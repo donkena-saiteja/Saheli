@@ -8,6 +8,9 @@
  * table. Written so a judge can confirm the claims without reading any code.
  */
 
+import algosdk from 'algosdk';
+import nacl from 'tweetnacl';
+
 const BASE = (() => {
   const idx = process.argv.indexOf('--url');
   if (idx >= 0 && process.argv[idx + 1]) return process.argv[idx + 1].replace(/\/$/, '');
@@ -248,6 +251,107 @@ async function main() {
     'Pending approvals are queued',
     pending.status === 200 && Array.isArray(pending.body.data),
     `${pending.body.data?.length} awaiting leader signatures`,
+  );
+
+  // ── Pera Wallet sign-in ──
+  // Drives the real endpoints with a throwaway keypair, signing exactly the way
+  // Pera does: ed25519 over "MX" || challenge.
+  console.log('\n\x1b[1mPera Wallet sign-in\x1b[0m');
+  const wallet = algosdk.generateAccount();
+  const walletAddress = wallet.addr.toString();
+
+  const signAsPera = (message: string, secretKey: Uint8Array) => {
+    const messageBytes = new TextEncoder().encode(message);
+    const signed = new Uint8Array(2 + messageBytes.length);
+    signed.set([77, 88], 0); // "MX" — Algorand's arbitrary-bytes domain prefix
+    signed.set(messageBytes, 2);
+    return Buffer.from(nacl.sign.detached(signed, secretKey)).toString('base64');
+  };
+
+  const challenge = await json('/api/auth/wallet/challenge', {
+    method: 'POST',
+    body: JSON.stringify({ address: walletAddress }),
+  });
+  record(
+    'Wallet challenge issued with a single-use nonce',
+    challenge.status === 200 && Boolean(challenge.body.data?.nonce) && Boolean(challenge.body.data?.message),
+    `address=${walletAddress.slice(0, 12)}… nonce=${challenge.body.data?.nonce?.slice(0, 10)}…`,
+  );
+
+  const signature = signAsPera(challenge.body.data?.message || '', wallet.sk);
+  const walletLogin = await json('/api/auth/wallet/verify', {
+    method: 'POST',
+    body: JSON.stringify({ address: walletAddress, nonce: challenge.body.data?.nonce, signature, role: 'leader' }),
+  });
+  record(
+    'Valid Pera signature issues a JWT session',
+    walletLogin.status === 201 && Boolean(walletLogin.body.data?.token),
+    `role=${walletLogin.body.data?.role} newAccount=${walletLogin.body.data?.isNewAccount}`,
+  );
+
+  const replay = await json('/api/auth/wallet/verify', {
+    method: 'POST',
+    body: JSON.stringify({ address: walletAddress, nonce: challenge.body.data?.nonce, signature }),
+  });
+  record(
+    'Replayed nonce is refused',
+    replay.status === 401,
+    `reason=${replay.body?.reason}`,
+  );
+
+  const forgeChallenge = await json('/api/auth/wallet/challenge', {
+    method: 'POST',
+    body: JSON.stringify({ address: walletAddress }),
+  });
+  const forged = signAsPera(forgeChallenge.body.data?.message || '', algosdk.generateAccount().sk);
+  const forgedRes = await json('/api/auth/wallet/verify', {
+    method: 'POST',
+    body: JSON.stringify({
+      address: walletAddress,
+      nonce: forgeChallenge.body.data?.nonce,
+      signature: forged,
+    }),
+  });
+  record(
+    'Signature from a different key is rejected',
+    forgedRes.status === 401 && forgedRes.body?.reason === 'bad_signature',
+    `reason=${forgedRes.body?.reason}`,
+  );
+
+  const walletProfile = await json('/api/auth/profile', {
+    headers: { Authorization: `Bearer ${walletLogin.body.data?.token}` },
+  });
+  record(
+    'Wallet session authenticates against a protected route',
+    walletProfile.status === 200 && walletProfile.body.data?.walletAddress === walletAddress,
+    `authProvider=${walletProfile.body.data?.authProvider}`,
+  );
+
+  // ── Full transaction ids ──
+  // The x402 proof-verification flow reads ids straight off this endpoint, so a
+  // truncated id here silently breaks it.
+  console.log('\n\x1b[1mTransaction ledger\x1b[0m');
+  const ledgerTx = await json('/api/transactions?limit=5');
+  const firstTx = ledgerTx.body.data?.[0];
+  record(
+    'Ledger exposes untruncated Algorand transaction ids',
+    ledgerTx.status === 200 && /^[A-Z2-7]{52}$/.test(firstTx?.transactionId || ''),
+    `transactionId=${firstTx?.transactionId?.slice(0, 20)}… (display: ${firstTx?.txId})`,
+  );
+
+  const proofPay = await json('/api/x402/demo/pay', {
+    method: 'POST',
+    body: JSON.stringify({ resourceId: 'verify-proof' }),
+  });
+  const proof = await json('/api/x402/verify-proof', {
+    method: 'POST',
+    headers: { 'X-PAYMENT': proofPay.body?.data?.paymentHeader },
+    body: JSON.stringify({ transactionId: firstTx?.transactionId }),
+  });
+  record(
+    'Paid proof verification resolves a real ledger record',
+    proof.status === 200 && proof.body.data?.verdict !== 'NOT_FOUND',
+    `verdict=${proof.body.data?.verdict}`,
   );
 
   // ── Summary ──

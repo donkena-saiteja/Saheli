@@ -66,6 +66,8 @@ export default function LeaderDashboard({ isReadOnly = false, activeSection = 't
   const { data: vaultData, loading: loadingVaults, refetch: refetchVaults } = useApiFetch(() => agentApi.getVaults());
   const { data: members } = useApiFetch(() => membersApi.getAll());
   const { data: loans, loading: loadingLoans, refetch: refetchLoans } = useApiFetch(() => loansApi.getAll());
+  // Full SHG ledger for the audit view — every anchored movement, newest first.
+  const { data: ledger, loading: loadingLedger } = useApiPolling(() => transactionsApi.getLedger(), 15000);
 
   const { mutate: signAction, loading: signing } = useApiMutation((id: string) => multisigApi.sign(id, 'leader_current'));
   const { mutate: rejectAction } = useApiMutation((id: string) => multisigApi.reject(id));
@@ -300,6 +302,67 @@ export default function LeaderDashboard({ isReadOnly = false, activeSection = 't
                 <span className="text-muted-foreground text-xs block mt-1">{timeAgo(entry.timestamp)}</span>
               </div>
             ))}
+          </div>
+        </div>
+
+        {/* Every SHG transaction, with the untruncated txid a judge can paste
+            into the Algorand explorer. */}
+        <div className="bg-white border border-border/50 rounded-2xl overflow-hidden">
+          <div className="px-6 py-4 border-b border-border/50 flex items-center justify-between gap-4">
+            <div>
+              <h3 className="font-bold">On-Chain Transaction Ledger</h3>
+              <p className="text-xs text-muted-foreground mt-0.5">
+                {(ledger || []).length} anchored movements across the group
+              </p>
+            </div>
+            <span className="text-[10px] font-bold uppercase tracking-wider text-emerald-700 bg-emerald-50 px-2 py-1 rounded-full">
+              Algorand
+            </span>
+          </div>
+
+          <div className="max-h-[28rem] overflow-y-auto divide-y divide-border/40">
+            {loadingLedger ? (
+              <div className="p-6 space-y-3">
+                <Skeleton className="h-5 w-2/3" />
+                <Skeleton className="h-5 w-1/2" />
+              </div>
+            ) : (ledger || []).length === 0 ? (
+              <p className="p-6 text-sm text-muted-foreground">No transactions recorded yet.</p>
+            ) : (
+              (ledger || []).map((tx: any) => (
+                <div key={tx.id} className="px-6 py-3 flex flex-wrap items-center gap-x-4 gap-y-1">
+                  <div className="min-w-0 flex-1">
+                    <p className="text-sm font-semibold text-on-surface capitalize">
+                      {String(tx.event || '').replace(/_/g, ' ')}
+                    </p>
+                    {tx.transactionId ? (
+                      <a
+                        href={tx.explorerUrl || `https://lora.algokit.io/testnet/transaction/${tx.transactionId}`}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="text-[11px] font-mono text-shg-primary hover:underline break-all"
+                      >
+                        {tx.transactionId}
+                      </a>
+                    ) : (
+                      <span className="text-[11px] font-mono text-muted-foreground">{tx.txId}</span>
+                    )}
+                  </div>
+                  <div className="text-right">
+                    <p
+                      className={`text-sm font-black ${
+                        tx.type === 'credit' ? 'text-emerald-600' : 'text-red-600'
+                      }`}
+                    >
+                      {tx.type === 'credit' ? '+' : '−'}₹{Math.abs(tx.amount).toLocaleString('en-IN')}
+                    </p>
+                    <p className="text-[10px] text-muted-foreground">
+                      {new Date(tx.timestamp).toLocaleString('en-IN')}
+                    </p>
+                  </div>
+                </div>
+              ))
+            )}
           </div>
         </div>
       </div>

@@ -15,9 +15,29 @@ export default defineConfig({
       "@": path.resolve(__dirname, "./src"),
     },
   },
+  build: {
+    // The Pera/Algorand and charting stacks are large and rarely change.
+    // Splitting them keeps the app chunk cacheable and under the size warning.
+    rollupOptions: {
+      output: {
+        manualChunks: {
+          algorand: ['@perawallet/connect', 'algosdk'],
+          charts: ['recharts'],
+          animation: ['gsap', '@gsap/react'],
+        },
+      },
+    },
+    chunkSizeWarningLimit: 900,
+  },
   server: {
     proxy: {
       '/api': {
+        target: 'http://127.0.0.1:3001',
+        changeOrigin: true,
+        secure: false,
+      },
+      // So http://localhost:5173/health mirrors the deployed setup.
+      '/health': {
         target: 'http://127.0.0.1:3001',
         changeOrigin: true,
         secure: false,

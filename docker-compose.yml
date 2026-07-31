@@ -36,6 +36,11 @@ services:
   app:
     build:
       context: ./app
+      args:
+        # nginx proxies /api and /health to the backend service, so a relative
+        # base URL is correct here.
+        VITE_API_BASE_URL: /api
+        VITE_ALGORAND_NETWORK: ${ALGORAND_NETWORK:-testnet}
     restart: unless-stopped
     depends_on:
       - backend
