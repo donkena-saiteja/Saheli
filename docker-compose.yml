@@ -1,0 +1,46 @@
+services:
+  mongo:
+    image: mongo:7
+    restart: unless-stopped
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo_data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  backend:
+    build:
+      context: ./backend
+    restart: unless-stopped
+    # Optional: Compose aborts on a missing env_file, and backend/.env is
+    # gitignored, so this must stay optional for a fresh clone to come up.
+    env_file:
+      - path: ./backend/.env
+        required: false
+    environment:
+      - NODE_ENV=production
+      - PORT=3001
+      - MONGODB_URI=mongodb://mongo:27017/saheli
+      - CORS_ORIGINS=http://localhost:8080
+      - ALGORAND_NETWORK=${ALGORAND_NETWORK:-testnet}
+    depends_on:
+      mongo:
+        condition: service_healthy
+    ports:
+      - "3001:3001"
+
+  app:
+    build:
+      context: ./app
+    restart: unless-stopped
+    depends_on:
+      - backend
+    ports:
+      - "8080:80"
+
+volumes:
+  mongo_data:

@@ -1,0 +1,495 @@
+#pragma version 11
+#pragma typetrack false
+
+// algopy.arc4.ARC4Contract.approval_program() -> uint64:
+main:
+    intcblock 0 1 8 4
+    bytecblock "asset_id" "total_calls" "total_revenue" "total_to_treasury" "admin" "treasury" "treasury_share_bps" 0x151f7c75 0x72637074
+    txn ApplicationID
+    bnz main_after_if_else@2
+    // smart_contracts/x402_gateway/contract.py:44
+    // self.admin = Global.creator_address
+    bytec 4 // "admin"
+    global CreatorAddress
+    app_global_put
+    // smart_contracts/x402_gateway/contract.py:45
+    // self.treasury = Global.creator_address
+    bytec 5 // "treasury"
+    global CreatorAddress
+    app_global_put
+    // smart_contracts/x402_gateway/contract.py:47-48
+    // # Settlement asset (USDC on the active network).
+    // self.asset_id = UInt64(0)
+    bytec_0 // "asset_id"
+    intc_0 // 0
+    app_global_put
+    // smart_contracts/x402_gateway/contract.py:50-51
+    // # Share of each payment routed to the SHG treasury, in basis points.
+    // self.treasury_share_bps = UInt64(8000)  # 80%
+    bytec 6 // "treasury_share_bps"
+    pushint 8000
+    app_global_put
+    // smart_contracts/x402_gateway/contract.py:53
+    // self.total_calls = UInt64(0)
+    bytec_1 // "total_calls"
+    intc_0 // 0
+    app_global_put
+    // smart_contracts/x402_gateway/contract.py:54
+    // self.total_revenue = UInt64(0)
+    bytec_2 // "total_revenue"
+    intc_0 // 0
+    app_global_put
+    // smart_contracts/x402_gateway/contract.py:55
+    // self.total_to_treasury = UInt64(0)
+    bytec_3 // "total_to_treasury"
+    intc_0 // 0
+    app_global_put
+
+main_after_if_else@2:
+    // smart_contracts/x402_gateway/contract.py:40
+    // class X402Gateway(ARC4Contract):
+    txn NumAppArgs
+    bz main___algopy_default_create@14
+    txn OnCompletion
+    !
+    assert
+    txn ApplicationID
+    assert
+    pushbytess 0x88605403 0x17f801f7 0x42265031 0x6ed81889 0xdf54e8aa // method "configure(address,uint64,uint64)void", method "settle(axfer,string)uint64", method "get_receipt(uint64)(address,string,uint64,uint64,uint64,uint64)", method "revenue_summary()(uint64,uint64,uint64)", method "opt_in_to_asset(uint64)void"
+    txna ApplicationArgs 0
+    match configure settle get_receipt revenue_summary opt_in_to_asset
+    err
+
+main___algopy_default_create@14:
+    txn OnCompletion
+    !
+    txn ApplicationID
+    !
+    &&
+    return
+
+
+// smart_contracts.x402_gateway.contract.X402Gateway.configure[routing]() -> void:
+configure:
+    // smart_contracts/x402_gateway/contract.py:60
+    // @arc4.abimethod
+    txna ApplicationArgs 1
+    dup
+    len
+    pushint 32
+    ==
+    assert // invalid number of bytes for arc4.static_array<arc4.uint8, 32>
+    txna ApplicationArgs 2
+    dup
+    len
+    intc_2 // 8
+    ==
+    assert // invalid number of bytes for arc4.uint64
+    btoi
+    txna ApplicationArgs 3
+    dup
+    len
+    intc_2 // 8
+    ==
+    assert // invalid number of bytes for arc4.uint64
+    btoi
+    // smart_contracts/x402_gateway/contract.py:62
+    // assert Txn.sender == self.admin, "only admin"
+    txn Sender
+    intc_0 // 0
+    bytec 4 // "admin"
+    app_global_get_ex
+    assert // check self.admin exists
+    ==
+    assert // only admin
+    // smart_contracts/x402_gateway/contract.py:63
+    // assert share_bps <= UInt64(10_000), "share cannot exceed 100%"
+    dup
+    pushint 10000
+    <=
+    assert // share cannot exceed 100%
+    // smart_contracts/x402_gateway/contract.py:65
+    // self.treasury = treasury
+    bytec 5 // "treasury"
+    uncover 3
+    app_global_put
+    // smart_contracts/x402_gateway/contract.py:66
+    // self.asset_id = asset_id
+    bytec_0 // "asset_id"
+    uncover 2
+    app_global_put
+    // smart_contracts/x402_gateway/contract.py:67
+    // self.treasury_share_bps = share_bps
+    bytec 6 // "treasury_share_bps"
+    swap
+    app_global_put
+    // smart_contracts/x402_gateway/contract.py:60
+    // @arc4.abimethod
+    intc_1 // 1
+    return
+
+
+// smart_contracts.x402_gateway.contract.X402Gateway.settle[routing]() -> void:
+settle:
+    // smart_contracts/x402_gateway/contract.py:69
+    // @arc4.abimethod
+    txn GroupIndex
+    intc_1 // 1
+    -
+    dup
+    gtxns TypeEnum
+    intc_3 // axfer
+    ==
+    assert // transaction type is axfer
+    txna ApplicationArgs 1
+    dup
+    intc_0 // 0
+    extract_uint16 // on error: invalid array length header
+    pushint 2
+    +
+    dig 1
+    len
+    ==
+    assert // invalid number of bytes for arc4.dynamic_array<arc4.uint8>
+    // smart_contracts/x402_gateway/contract.py:81
+    // assert payment.xfer_asset.id == self.asset_id, "wrong settlement asset"
+    dig 1
+    gtxns XferAsset
+    intc_0 // 0
+    bytec_0 // "asset_id"
+    app_global_get_ex
+    assert // check self.asset_id exists
+    ==
+    assert // wrong settlement asset
+    // smart_contracts/x402_gateway/contract.py:82
+    // assert payment.asset_receiver == Global.current_application_address, "wrong receiver"
+    dig 1
+    gtxns AssetReceiver
+    global CurrentApplicationAddress
+    ==
+    assert // wrong receiver
+    // smart_contracts/x402_gateway/contract.py:83
+    // assert payment.asset_amount > UInt64(0), "amount must be positive"
+    dig 1
+    gtxns AssetAmount
+    dup
+    assert // amount must be positive
+    // smart_contracts/x402_gateway/contract.py:84
+    // assert payment.asset_close_to == Global.zero_address, "must not close asset holding"
+    dig 2
+    gtxns AssetCloseTo
+    global ZeroAddress
+    ==
+    assert // must not close asset holding
+    // smart_contracts/x402_gateway/contract.py:85
+    // assert payment.rekey_to == Global.zero_address, "must not rekey"
+    dig 2
+    gtxns RekeyTo
+    global ZeroAddress
+    ==
+    assert // must not rekey
+    // smart_contracts/x402_gateway/contract.py:88
+    // treasury_cut = (amount * self.treasury_share_bps) // UInt64(10_000)
+    intc_0 // 0
+    bytec 6 // "treasury_share_bps"
+    app_global_get_ex
+    assert // check self.treasury_share_bps exists
+    dig 1
+    *
+    pushint 10000
+    /
+    dup
+    cover 4
+    // smart_contracts/x402_gateway/contract.py:90
+    // receipt_id = self.total_calls + UInt64(1)
+    intc_0 // 0
+    bytec_1 // "total_calls"
+    app_global_get_ex
+    assert // check self.total_calls exists
+    intc_1 // 1
+    +
+    // smart_contracts/x402_gateway/contract.py:92
+    // payer=arc4.Address(payment.sender),
+    uncover 4
+    gtxns Sender
+    // smart_contracts/x402_gateway/contract.py:94
+    // amount=arc4.UInt64(amount),
+    dig 3
+    itob
+    // smart_contracts/x402_gateway/contract.py:95
+    // treasury_share=arc4.UInt64(treasury_cut),
+    dig 3
+    itob
+    // smart_contracts/x402_gateway/contract.py:96
+    // timestamp=arc4.UInt64(Global.latest_timestamp),
+    global LatestTimestamp
+    itob
+    // smart_contracts/x402_gateway/contract.py:97
+    // round_settled=arc4.UInt64(Global.round),
+    global Round
+    itob
+    // smart_contracts/x402_gateway/contract.py:91-98
+    // self.receipts[receipt_id] = PaymentReceipt(
+    //     payer=arc4.Address(payment.sender),
+    //     resource_id=resource_id,
+    //     amount=arc4.UInt64(amount),
+    //     treasury_share=arc4.UInt64(treasury_cut),
+    //     timestamp=arc4.UInt64(Global.latest_timestamp),
+    //     round_settled=arc4.UInt64(Global.round),
+    // )
+    uncover 4
+    pushbytes 0x0042
+    concat
+    uncover 4
+    concat
+    uncover 3
+    concat
+    uncover 2
+    concat
+    swap
+    concat
+    uncover 4
+    concat
+    // smart_contracts/x402_gateway/contract.py:91
+    // self.receipts[receipt_id] = PaymentReceipt(
+    dig 1
+    itob
+    dup
+    cover 5
+    bytec 8 // 0x72637074
+    swap
+    concat
+    // smart_contracts/x402_gateway/contract.py:91-98
+    // self.receipts[receipt_id] = PaymentReceipt(
+    //     payer=arc4.Address(payment.sender),
+    //     resource_id=resource_id,
+    //     amount=arc4.UInt64(amount),
+    //     treasury_share=arc4.UInt64(treasury_cut),
+    //     timestamp=arc4.UInt64(Global.latest_timestamp),
+    //     round_settled=arc4.UInt64(Global.round),
+    // )
+    dup
+    box_del
+    pop
+    swap
+    box_put
+    // smart_contracts/x402_gateway/contract.py:100
+    // self.total_calls = receipt_id
+    bytec_1 // "total_calls"
+    swap
+    app_global_put
+    // smart_contracts/x402_gateway/contract.py:101
+    // self.total_revenue += amount
+    intc_0 // 0
+    bytec_2 // "total_revenue"
+    app_global_get_ex
+    assert // check self.total_revenue exists
+    uncover 2
+    +
+    bytec_2 // "total_revenue"
+    swap
+    app_global_put
+    // smart_contracts/x402_gateway/contract.py:102
+    // self.total_to_treasury += treasury_cut
+    intc_0 // 0
+    bytec_3 // "total_to_treasury"
+    app_global_get_ex
+    assert // check self.total_to_treasury exists
+    dig 1
+    +
+    bytec_3 // "total_to_treasury"
+    swap
+    app_global_put
+    // smart_contracts/x402_gateway/contract.py:104-105
+    // # The SHG's cut leaves in the same transaction that recorded it.
+    // if treasury_cut > UInt64(0):
+    bz settle_after_if_else@4
+    // smart_contracts/x402_gateway/contract.py:106-111
+    // itxn.AssetTransfer(
+    //     xfer_asset=self.asset_id,
+    //     asset_receiver=self.treasury,
+    //     asset_amount=treasury_cut,
+    //     fee=0,
+    // ).submit()
+    itxn_begin
+    // smart_contracts/x402_gateway/contract.py:107
+    // xfer_asset=self.asset_id,
+    intc_0 // 0
+    bytec_0 // "asset_id"
+    app_global_get_ex
+    assert // check self.asset_id exists
+    // smart_contracts/x402_gateway/contract.py:108
+    // asset_receiver=self.treasury,
+    intc_0 // 0
+    bytec 5 // "treasury"
+    app_global_get_ex
+    assert // check self.treasury exists
+    dig 3
+    itxn_field AssetAmount
+    itxn_field AssetReceiver
+    itxn_field XferAsset
+    // smart_contracts/x402_gateway/contract.py:106
+    // itxn.AssetTransfer(
+    intc_3 // axfer
+    itxn_field TypeEnum
+    // smart_contracts/x402_gateway/contract.py:110
+    // fee=0,
+    intc_0 // 0
+    itxn_field Fee
+    // smart_contracts/x402_gateway/contract.py:106-111
+    // itxn.AssetTransfer(
+    //     xfer_asset=self.asset_id,
+    //     asset_receiver=self.treasury,
+    //     asset_amount=treasury_cut,
+    //     fee=0,
+    // ).submit()
+    itxn_submit
+
+settle_after_if_else@4:
+    // smart_contracts/x402_gateway/contract.py:69
+    // @arc4.abimethod
+    bytec 7 // 0x151f7c75
+    swap
+    concat
+    log
+    intc_1 // 1
+    return
+
+
+// smart_contracts.x402_gateway.contract.X402Gateway.get_receipt[routing]() -> void:
+get_receipt:
+    // smart_contracts/x402_gateway/contract.py:115
+    // @arc4.abimethod(readonly=True)
+    txna ApplicationArgs 1
+    dup
+    len
+    intc_2 // 8
+    ==
+    assert // invalid number of bytes for arc4.uint64
+    btoi
+    // smart_contracts/x402_gateway/contract.py:117
+    // assert receipt_id in self.receipts, "unknown receipt"
+    itob
+    bytec 8 // 0x72637074
+    swap
+    concat
+    dup
+    box_len
+    bury 1
+    assert // unknown receipt
+    // smart_contracts/x402_gateway/contract.py:118
+    // return self.receipts[receipt_id]
+    box_get
+    pop
+    // smart_contracts/x402_gateway/contract.py:115
+    // @arc4.abimethod(readonly=True)
+    bytec 7 // 0x151f7c75
+    swap
+    concat
+    log
+    intc_1 // 1
+    return
+
+
+// smart_contracts.x402_gateway.contract.X402Gateway.revenue_summary[routing]() -> void:
+revenue_summary:
+    // smart_contracts/x402_gateway/contract.py:125
+    // arc4.UInt64(self.total_calls),
+    intc_0 // 0
+    bytec_1 // "total_calls"
+    app_global_get_ex
+    assert // check self.total_calls exists
+    itob
+    // smart_contracts/x402_gateway/contract.py:126
+    // arc4.UInt64(self.total_revenue),
+    intc_0 // 0
+    bytec_2 // "total_revenue"
+    app_global_get_ex
+    assert // check self.total_revenue exists
+    itob
+    // smart_contracts/x402_gateway/contract.py:127
+    // arc4.UInt64(self.total_to_treasury),
+    intc_0 // 0
+    bytec_3 // "total_to_treasury"
+    app_global_get_ex
+    assert // check self.total_to_treasury exists
+    itob
+    // smart_contracts/x402_gateway/contract.py:123-129
+    // return arc4.Tuple(
+    //     (
+    //         arc4.UInt64(self.total_calls),
+    //         arc4.UInt64(self.total_revenue),
+    //         arc4.UInt64(self.total_to_treasury),
+    //     )
+    // )
+    cover 2
+    concat
+    swap
+    concat
+    // smart_contracts/x402_gateway/contract.py:120
+    // @arc4.abimethod(readonly=True)
+    bytec 7 // 0x151f7c75
+    swap
+    concat
+    log
+    intc_1 // 1
+    return
+
+
+// smart_contracts.x402_gateway.contract.X402Gateway.opt_in_to_asset[routing]() -> void:
+opt_in_to_asset:
+    // smart_contracts/x402_gateway/contract.py:131
+    // @arc4.abimethod
+    txna ApplicationArgs 1
+    dup
+    len
+    intc_2 // 8
+    ==
+    assert // invalid number of bytes for arc4.uint64
+    btoi
+    // smart_contracts/x402_gateway/contract.py:134
+    // assert Txn.sender == self.admin, "only admin"
+    txn Sender
+    intc_0 // 0
+    bytec 4 // "admin"
+    app_global_get_ex
+    assert // check self.admin exists
+    ==
+    assert // only admin
+    // smart_contracts/x402_gateway/contract.py:136-141
+    // itxn.AssetTransfer(
+    //     xfer_asset=asset_id,
+    //     asset_receiver=Global.current_application_address,
+    //     asset_amount=0,
+    //     fee=0,
+    // ).submit()
+    itxn_begin
+    // smart_contracts/x402_gateway/contract.py:138
+    // asset_receiver=Global.current_application_address,
+    global CurrentApplicationAddress
+    // smart_contracts/x402_gateway/contract.py:139
+    // asset_amount=0,
+    intc_0 // 0
+    itxn_field AssetAmount
+    itxn_field AssetReceiver
+    itxn_field XferAsset
+    // smart_contracts/x402_gateway/contract.py:136
+    // itxn.AssetTransfer(
+    intc_3 // axfer
+    itxn_field TypeEnum
+    // smart_contracts/x402_gateway/contract.py:140
+    // fee=0,
+    intc_0 // 0
+    itxn_field Fee
+    // smart_contracts/x402_gateway/contract.py:136-141
+    // itxn.AssetTransfer(
+    //     xfer_asset=asset_id,
+    //     asset_receiver=Global.current_application_address,
+    //     asset_amount=0,
+    //     fee=0,
+    // ).submit()
+    itxn_submit
+    // smart_contracts/x402_gateway/contract.py:131
+    // @arc4.abimethod
+    intc_1 // 1
+    return

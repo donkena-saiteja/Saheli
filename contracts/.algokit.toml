@@ -1,0 +1,22 @@
+[algokit]
+min_version = "v2.0.0"
+
+[project]
+type = "contract"
+name = "saheli-shg-contracts"
+artifacts = "artifacts"
+
+[project.run]
+build = { commands = [
+  "python -m puyapy --out-dir ../../artifacts/shg_treasury smart_contracts/shg_treasury/contract.py",
+  "python -m puyapy --out-dir ../../artifacts/x402_gateway smart_contracts/x402_gateway/contract.py",
+  "python -m puyapy --out-dir ../../artifacts/dsbt_registry smart_contracts/dsbt_registry/contract.py",
+], description = "Compile all Saheli contracts to TEAL + ARC-56" }
+
+deploy = { commands = [
+  "python -m smart_contracts.deploy",
+], description = "Deploy contracts to the configured Algorand network" }
+
+[generate.smart_contract]
+path = "smart_contracts"
+description = "Saheli SHG Chain smart contracts"

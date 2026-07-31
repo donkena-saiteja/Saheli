@@ -1,0 +1,12 @@
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.env
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+
+# Source maps are build noise; the TEAL and ARC-56 specs ARE committed
+# so judges can verify the contracts without a Python toolchain.
+*.puya.map

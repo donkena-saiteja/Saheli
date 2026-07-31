@@ -1,0 +1,882 @@
+#pragma version 11
+#pragma typetrack false
+
+// algopy.arc4.ARC4Contract.approval_program() -> uint64:
+main:
+    intcblock 0 1 32 3 1000
+    bytecblock 0x151f7c75 0x736274 "admin" "oracle" "total_passports"
+    txn ApplicationID
+    bnz main_after_if_else@2
+    // smart_contracts/dsbt_registry/contract.py:59
+    // self.admin = Global.creator_address
+    bytec_2 // "admin"
+    global CreatorAddress
+    app_global_put
+    // smart_contracts/dsbt_registry/contract.py:60-61
+    // # The agent backend authorised to report repayment events.
+    // self.oracle = Global.creator_address
+    bytec_3 // "oracle"
+    global CreatorAddress
+    app_global_put
+    // smart_contracts/dsbt_registry/contract.py:62
+    // self.total_passports = UInt64(0)
+    bytec 4 // "total_passports"
+    intc_0 // 0
+    app_global_put
+
+main_after_if_else@2:
+    // smart_contracts/dsbt_registry/contract.py:55
+    // class DsbtRegistry(ARC4Contract):
+    txn NumAppArgs
+    bz main___algopy_default_create@19
+    txn OnCompletion
+    !
+    assert
+    txn ApplicationID
+    assert
+    pushbytess 0x3368f556 0x186c1f03 0x04f20d08 0xed7a53ab 0x44923ca4 0x71aa8183 0x4911312f 0x2cd0943c 0xe6277338 0x91d0ccc0 // method "set_oracle(address)void", method "mint(address,uint64)uint64", method "record_on_time_repayment(address)uint64", method "record_late_repayment(address)uint64", method "record_default(address)uint64", method "record_deposit_streak(address)uint64", method "record_loan_cleared(address)uint64", method "get_passport(address)(address,uint64,uint64,uint64,uint64,uint64,uint64,uint64,uint64)", method "score_of(address)uint64", method "credit_multiplier(address)uint64"
+    txna ApplicationArgs 0
+    match set_oracle mint record_on_time_repayment record_late_repayment record_default record_deposit_streak record_loan_cleared get_passport score_of credit_multiplier
+    err
+
+main___algopy_default_create@19:
+    txn OnCompletion
+    !
+    txn ApplicationID
+    !
+    &&
+    return
+
+
+// smart_contracts.dsbt_registry.contract.DsbtRegistry.set_oracle[routing]() -> void:
+set_oracle:
+    // smart_contracts/dsbt_registry/contract.py:66
+    // @arc4.abimethod
+    txna ApplicationArgs 1
+    dup
+    len
+    intc_2 // 32
+    ==
+    assert // invalid number of bytes for arc4.static_array<arc4.uint8, 32>
+    // smart_contracts/dsbt_registry/contract.py:68
+    // assert Txn.sender == self.admin, "only admin"
+    txn Sender
+    intc_0 // 0
+    bytec_2 // "admin"
+    app_global_get_ex
+    assert // check self.admin exists
+    ==
+    assert // only admin
+    // smart_contracts/dsbt_registry/contract.py:69
+    // self.oracle = oracle
+    bytec_3 // "oracle"
+    swap
+    app_global_put
+    // smart_contracts/dsbt_registry/contract.py:66
+    // @arc4.abimethod
+    intc_1 // 1
+    return
+
+
+// smart_contracts.dsbt_registry.contract.DsbtRegistry.mint[routing]() -> void:
+mint:
+    // smart_contracts/dsbt_registry/contract.py:73
+    // @arc4.abimethod
+    txna ApplicationArgs 1
+    dup
+    len
+    intc_2 // 32
+    ==
+    assert // invalid number of bytes for arc4.static_array<arc4.uint8, 32>
+    txna ApplicationArgs 2
+    dup
+    cover 2
+    dup
+    len
+    pushint 8
+    ==
+    assert // invalid number of bytes for arc4.uint64
+    btoi
+    // smart_contracts/dsbt_registry/contract.py:82
+    // assert Txn.sender == self.admin or Txn.sender == self.oracle, "not authorised"
+    txn Sender
+    intc_0 // 0
+    bytec_2 // "admin"
+    app_global_get_ex
+    assert // check self.admin exists
+    ==
+    bnz mint_bool_true@3
+    txn Sender
+    intc_0 // 0
+    bytec_3 // "oracle"
+    app_global_get_ex
+    assert // check self.oracle exists
+    ==
+    bz mint_bool_false@4
+
+mint_bool_true@3:
+    intc_1 // 1
+
+mint_bool_merge@5:
+    // smart_contracts/dsbt_registry/contract.py:82
+    // assert Txn.sender == self.admin or Txn.sender == self.oracle, "not authorised"
+    assert // not authorised
+    // smart_contracts/dsbt_registry/contract.py:83
+    // assert member not in self.passports, "passport already exists"
+    bytec_1 // 0x736274
+    uncover 2
+    dup
+    cover 2
+    concat
+    dup
+    box_len
+    bury 1
+    !
+    assert // passport already exists
+    // smart_contracts/dsbt_registry/contract.py:84
+    // assert initial_score <= UInt64(1000), "score out of range"
+    uncover 2
+    dup
+    intc 4 // 1000
+    <=
+    assert // score out of range
+    // smart_contracts/dsbt_registry/contract.py:87-101
+    // itxn.AssetConfig(
+    //     total=1,
+    //     decimals=0,
+    //     unit_name=b"SAHELI",
+    //     asset_name=b"Saheli Financial Health Passport",
+    //     url=b"https://saheli.chain/dsbt",
+    //     manager=Global.current_application_address,
+    //     # Retained deliberately — these are the soulbound enforcement.
+    //     freeze=Global.current_application_address,
+    //     clawback=Global.current_application_address,
+    //     reserve=Global.current_application_address,
+    //     default_frozen=True,
+    //     fee=0,
+    // )
+    // .submit()
+    itxn_begin
+    // smart_contracts/dsbt_registry/contract.py:93
+    // manager=Global.current_application_address,
+    global CurrentApplicationAddress
+    // smart_contracts/dsbt_registry/contract.py:94-97
+    // # Retained deliberately — these are the soulbound enforcement.
+    // freeze=Global.current_application_address,
+    // clawback=Global.current_application_address,
+    // reserve=Global.current_application_address,
+    dupn 3
+    // smart_contracts/dsbt_registry/contract.py:98
+    // default_frozen=True,
+    intc_1 // 1
+    itxn_field ConfigAssetDefaultFrozen
+    itxn_field ConfigAssetReserve
+    itxn_field ConfigAssetClawback
+    itxn_field ConfigAssetFreeze
+    itxn_field ConfigAssetManager
+    // smart_contracts/dsbt_registry/contract.py:92
+    // url=b"https://saheli.chain/dsbt",
+    pushbytes 0x68747470733a2f2f736168656c692e636861696e2f64736274
+    itxn_field ConfigAssetURL
+    // smart_contracts/dsbt_registry/contract.py:91
+    // asset_name=b"Saheli Financial Health Passport",
+    pushbytes 0x536168656c692046696e616e6369616c204865616c74682050617373706f7274
+    itxn_field ConfigAssetName
+    // smart_contracts/dsbt_registry/contract.py:90
+    // unit_name=b"SAHELI",
+    pushbytes 0x534148454c49
+    itxn_field ConfigAssetUnitName
+    // smart_contracts/dsbt_registry/contract.py:89
+    // decimals=0,
+    intc_0 // 0
+    itxn_field ConfigAssetDecimals
+    // smart_contracts/dsbt_registry/contract.py:88
+    // total=1,
+    intc_1 // 1
+    itxn_field ConfigAssetTotal
+    // smart_contracts/dsbt_registry/contract.py:87
+    // itxn.AssetConfig(
+    intc_3 // acfg
+    itxn_field TypeEnum
+    // smart_contracts/dsbt_registry/contract.py:99
+    // fee=0,
+    intc_0 // 0
+    itxn_field Fee
+    // smart_contracts/dsbt_registry/contract.py:87-101
+    // itxn.AssetConfig(
+    //     total=1,
+    //     decimals=0,
+    //     unit_name=b"SAHELI",
+    //     asset_name=b"Saheli Financial Health Passport",
+    //     url=b"https://saheli.chain/dsbt",
+    //     manager=Global.current_application_address,
+    //     # Retained deliberately — these are the soulbound enforcement.
+    //     freeze=Global.current_application_address,
+    //     clawback=Global.current_application_address,
+    //     reserve=Global.current_application_address,
+    //     default_frozen=True,
+    //     fee=0,
+    // )
+    // .submit()
+    itxn_submit
+    // smart_contracts/dsbt_registry/contract.py:87-102
+    // itxn.AssetConfig(
+    //     total=1,
+    //     decimals=0,
+    //     unit_name=b"SAHELI",
+    //     asset_name=b"Saheli Financial Health Passport",
+    //     url=b"https://saheli.chain/dsbt",
+    //     manager=Global.current_application_address,
+    //     # Retained deliberately — these are the soulbound enforcement.
+    //     freeze=Global.current_application_address,
+    //     clawback=Global.current_application_address,
+    //     reserve=Global.current_application_address,
+    //     default_frozen=True,
+    //     fee=0,
+    // )
+    // .submit()
+    // .created_asset
+    itxn CreatedAssetID
+    // smart_contracts/dsbt_registry/contract.py:108
+    // tier=arc4.UInt64(self._tier_for(initial_score)),
+    swap
+    callsub _tier_for
+    itob
+    // smart_contracts/dsbt_registry/contract.py:109
+    // on_time_repayments=arc4.UInt64(0),
+    intc_0 // 0
+    itob
+    // smart_contracts/dsbt_registry/contract.py:113
+    // asset_id=arc4.UInt64(asset.id),
+    uncover 2
+    itob
+    // smart_contracts/dsbt_registry/contract.py:114
+    // updated_round=arc4.UInt64(Global.round),
+    global Round
+    itob
+    // smart_contracts/dsbt_registry/contract.py:105-115
+    // self.passports[member] = Passport(
+    //     owner=arc4.Address(member),
+    //     score=arc4.UInt64(initial_score),
+    //     tier=arc4.UInt64(self._tier_for(initial_score)),
+    //     on_time_repayments=arc4.UInt64(0),
+    //     late_repayments=arc4.UInt64(0),
+    //     defaults=arc4.UInt64(0),
+    //     deposit_streak=arc4.UInt64(0),
+    //     asset_id=arc4.UInt64(asset.id),
+    //     updated_round=arc4.UInt64(Global.round),
+    // )
+    uncover 5
+    uncover 6
+    concat
+    uncover 4
+    concat
+    dig 3
+    concat
+    dig 3
+    concat
+    dig 3
+    concat
+    uncover 3
+    concat
+    dig 2
+    concat
+    swap
+    concat
+    uncover 2
+    swap
+    box_put
+    // smart_contracts/dsbt_registry/contract.py:117
+    // self.total_passports += UInt64(1)
+    intc_0 // 0
+    bytec 4 // "total_passports"
+    app_global_get_ex
+    assert // check self.total_passports exists
+    intc_1 // 1
+    +
+    bytec 4 // "total_passports"
+    swap
+    app_global_put
+    // smart_contracts/dsbt_registry/contract.py:73
+    // @arc4.abimethod
+    bytec_0 // 0x151f7c75
+    swap
+    concat
+    log
+    intc_1 // 1
+    return
+
+mint_bool_false@4:
+    intc_0 // 0
+    b mint_bool_merge@5
+
+
+// smart_contracts.dsbt_registry.contract.DsbtRegistry.record_on_time_repayment[routing]() -> void:
+record_on_time_repayment:
+    // smart_contracts/dsbt_registry/contract.py:122
+    // @arc4.abimethod
+    txna ApplicationArgs 1
+    dup
+    len
+    intc_2 // 32
+    ==
+    assert // invalid number of bytes for arc4.static_array<arc4.uint8, 32>
+    // smart_contracts/dsbt_registry/contract.py:124
+    // return self._apply(member, UInt64(POINTS_ON_TIME_REPAYMENT), True, UInt64(1), UInt64(0), UInt64(0))
+    pushint 12
+    intc_1 // 1
+    dup
+    intc_0 // 0
+    dup
+    callsub _apply
+    // smart_contracts/dsbt_registry/contract.py:122
+    // @arc4.abimethod
+    itob
+    bytec_0 // 0x151f7c75
+    swap
+    concat
+    log
+    intc_1 // 1
+    return
+
+
+// smart_contracts.dsbt_registry.contract.DsbtRegistry.record_late_repayment[routing]() -> void:
+record_late_repayment:
+    // smart_contracts/dsbt_registry/contract.py:126
+    // @arc4.abimethod
+    txna ApplicationArgs 1
+    dup
+    len
+    intc_2 // 32
+    ==
+    assert // invalid number of bytes for arc4.static_array<arc4.uint8, 32>
+    // smart_contracts/dsbt_registry/contract.py:128
+    // return self._apply(member, UInt64(POINTS_LATE_REPAYMENT), False, UInt64(0), UInt64(1), UInt64(0))
+    pushint 18
+    intc_0 // 0
+    dup
+    intc_1 // 1
+    intc_0 // 0
+    callsub _apply
+    // smart_contracts/dsbt_registry/contract.py:126
+    // @arc4.abimethod
+    itob
+    bytec_0 // 0x151f7c75
+    swap
+    concat
+    log
+    intc_1 // 1
+    return
+
+
+// smart_contracts.dsbt_registry.contract.DsbtRegistry.record_default[routing]() -> void:
+record_default:
+    // smart_contracts/dsbt_registry/contract.py:130
+    // @arc4.abimethod
+    txna ApplicationArgs 1
+    dup
+    len
+    intc_2 // 32
+    ==
+    assert // invalid number of bytes for arc4.static_array<arc4.uint8, 32>
+    // smart_contracts/dsbt_registry/contract.py:132
+    // return self._apply(member, UInt64(POINTS_DEFAULT), False, UInt64(0), UInt64(0), UInt64(1))
+    pushint 85
+    intc_0 // 0
+    dupn 2
+    intc_1 // 1
+    callsub _apply
+    // smart_contracts/dsbt_registry/contract.py:130
+    // @arc4.abimethod
+    itob
+    bytec_0 // 0x151f7c75
+    swap
+    concat
+    log
+    intc_1 // 1
+    return
+
+
+// smart_contracts.dsbt_registry.contract.DsbtRegistry.record_deposit_streak[routing]() -> void:
+record_deposit_streak:
+    // smart_contracts/dsbt_registry/contract.py:134
+    // @arc4.abimethod
+    txna ApplicationArgs 1
+    dup
+    len
+    intc_2 // 32
+    ==
+    assert // invalid number of bytes for arc4.static_array<arc4.uint8, 32>
+    // smart_contracts/dsbt_registry/contract.py:136
+    // assert Txn.sender == self.admin or Txn.sender == self.oracle, "not authorised"
+    txn Sender
+    intc_0 // 0
+    bytec_2 // "admin"
+    app_global_get_ex
+    assert // check self.admin exists
+    ==
+    bnz record_deposit_streak_bool_true@3
+    txn Sender
+    intc_0 // 0
+    bytec_3 // "oracle"
+    app_global_get_ex
+    assert // check self.oracle exists
+    ==
+    bz record_deposit_streak_bool_false@4
+
+record_deposit_streak_bool_true@3:
+    intc_1 // 1
+
+record_deposit_streak_bool_merge@5:
+    // smart_contracts/dsbt_registry/contract.py:136
+    // assert Txn.sender == self.admin or Txn.sender == self.oracle, "not authorised"
+    assert // not authorised
+    // smart_contracts/dsbt_registry/contract.py:137
+    // assert member in self.passports, "no passport"
+    bytec_1 // 0x736274
+    dig 1
+    concat
+    dup
+    box_len
+    bury 1
+    assert // no passport
+    // smart_contracts/dsbt_registry/contract.py:139
+    // passport = self.passports[member].copy()
+    dup
+    box_get
+    pop
+    // smart_contracts/dsbt_registry/contract.py:140
+    // passport.deposit_streak = arc4.UInt64(passport.deposit_streak.native + UInt64(1))
+    pushint 72
+    extract_uint64
+    intc_1 // 1
+    +
+    itob
+    // smart_contracts/dsbt_registry/contract.py:140-141
+    // passport.deposit_streak = arc4.UInt64(passport.deposit_streak.native + UInt64(1))
+    // self.passports[member] = passport.copy()
+    pushint 72
+    swap
+    box_replace // on error: index out of bounds
+    // smart_contracts/dsbt_registry/contract.py:143
+    // return self._apply(member, UInt64(POINTS_DEPOSIT_STREAK), True, UInt64(0), UInt64(0), UInt64(0))
+    pushint 6
+    intc_1 // 1
+    intc_0 // 0
+    dupn 2
+    callsub _apply
+    // smart_contracts/dsbt_registry/contract.py:134
+    // @arc4.abimethod
+    itob
+    bytec_0 // 0x151f7c75
+    swap
+    concat
+    log
+    intc_1 // 1
+    return
+
+record_deposit_streak_bool_false@4:
+    intc_0 // 0
+    b record_deposit_streak_bool_merge@5
+
+
+// smart_contracts.dsbt_registry.contract.DsbtRegistry.record_loan_cleared[routing]() -> void:
+record_loan_cleared:
+    // smart_contracts/dsbt_registry/contract.py:145
+    // @arc4.abimethod
+    txna ApplicationArgs 1
+    dup
+    len
+    intc_2 // 32
+    ==
+    assert // invalid number of bytes for arc4.static_array<arc4.uint8, 32>
+    // smart_contracts/dsbt_registry/contract.py:147
+    // return self._apply(member, UInt64(POINTS_LOAN_CLEARED), True, UInt64(0), UInt64(0), UInt64(0))
+    pushint 25
+    intc_1 // 1
+    intc_0 // 0
+    dupn 2
+    callsub _apply
+    // smart_contracts/dsbt_registry/contract.py:145
+    // @arc4.abimethod
+    itob
+    bytec_0 // 0x151f7c75
+    swap
+    concat
+    log
+    intc_1 // 1
+    return
+
+
+// smart_contracts.dsbt_registry.contract.DsbtRegistry.get_passport[routing]() -> void:
+get_passport:
+    // smart_contracts/dsbt_registry/contract.py:151
+    // @arc4.abimethod(readonly=True)
+    txna ApplicationArgs 1
+    dup
+    len
+    intc_2 // 32
+    ==
+    assert // invalid number of bytes for arc4.static_array<arc4.uint8, 32>
+    // smart_contracts/dsbt_registry/contract.py:153
+    // assert member in self.passports, "no passport"
+    bytec_1 // 0x736274
+    swap
+    concat
+    dup
+    box_len
+    bury 1
+    assert // no passport
+    // smart_contracts/dsbt_registry/contract.py:154
+    // return self.passports[member]
+    box_get
+    pop
+    // smart_contracts/dsbt_registry/contract.py:151
+    // @arc4.abimethod(readonly=True)
+    bytec_0 // 0x151f7c75
+    swap
+    concat
+    log
+    intc_1 // 1
+    return
+
+
+// smart_contracts.dsbt_registry.contract.DsbtRegistry.score_of[routing]() -> void:
+score_of:
+    // smart_contracts/dsbt_registry/contract.py:156
+    // @arc4.abimethod(readonly=True)
+    txna ApplicationArgs 1
+    dup
+    len
+    intc_2 // 32
+    ==
+    assert // invalid number of bytes for arc4.static_array<arc4.uint8, 32>
+    // smart_contracts/dsbt_registry/contract.py:158
+    // assert member in self.passports, "no passport"
+    bytec_1 // 0x736274
+    swap
+    concat
+    dup
+    box_len
+    bury 1
+    assert // no passport
+    // smart_contracts/dsbt_registry/contract.py:159
+    // score: UInt64 = self.passports[member].score.native
+    box_get
+    pop
+    extract 32 8
+    // smart_contracts/dsbt_registry/contract.py:156
+    // @arc4.abimethod(readonly=True)
+    bytec_0 // 0x151f7c75
+    swap
+    concat
+    log
+    intc_1 // 1
+    return
+
+
+// smart_contracts.dsbt_registry.contract.DsbtRegistry.credit_multiplier[routing]() -> void:
+credit_multiplier:
+    // smart_contracts/dsbt_registry/contract.py:162
+    // @arc4.abimethod(readonly=True)
+    txna ApplicationArgs 1
+    dup
+    len
+    intc_2 // 32
+    ==
+    assert // invalid number of bytes for arc4.static_array<arc4.uint8, 32>
+    // smart_contracts/dsbt_registry/contract.py:165
+    // assert member in self.passports, "no passport"
+    bytec_1 // 0x736274
+    swap
+    concat
+    dup
+    box_len
+    bury 1
+    assert // no passport
+    // smart_contracts/dsbt_registry/contract.py:166
+    // tier = self.passports[member].tier.native
+    box_get
+    pop
+    pushint 40
+    extract_uint64
+    dup
+    // smart_contracts/dsbt_registry/contract.py:168
+    // if tier == UInt64(TIER_PLATINUM):
+    intc_3 // 3
+    ==
+    bz credit_multiplier_after_if_else@3
+    pop
+    // smart_contracts/dsbt_registry/contract.py:169
+    // return UInt64(5)
+    pushint 5
+
+credit_multiplier_after_inlined_smart_contracts.dsbt_registry.contract.DsbtRegistry.credit_multiplier@8:
+    // smart_contracts/dsbt_registry/contract.py:162
+    // @arc4.abimethod(readonly=True)
+    itob
+    bytec_0 // 0x151f7c75
+    swap
+    concat
+    log
+    intc_1 // 1
+    return
+
+credit_multiplier_after_if_else@3:
+    // smart_contracts/dsbt_registry/contract.py:170
+    // if tier == UInt64(TIER_GOLD):
+    dup
+    pushint 2
+    ==
+    bz credit_multiplier_after_if_else@5
+    pop
+    // smart_contracts/dsbt_registry/contract.py:171
+    // return UInt64(3)
+    intc_3 // 3
+    // smart_contracts/dsbt_registry/contract.py:162
+    // @arc4.abimethod(readonly=True)
+    b credit_multiplier_after_inlined_smart_contracts.dsbt_registry.contract.DsbtRegistry.credit_multiplier@8
+
+credit_multiplier_after_if_else@5:
+    // smart_contracts/dsbt_registry/contract.py:172
+    // if tier == UInt64(TIER_SILVER):
+    intc_1 // 1
+    ==
+    bz credit_multiplier_after_if_else@7
+    // smart_contracts/dsbt_registry/contract.py:173
+    // return UInt64(2)
+    pushint 2
+    // smart_contracts/dsbt_registry/contract.py:162
+    // @arc4.abimethod(readonly=True)
+    b credit_multiplier_after_inlined_smart_contracts.dsbt_registry.contract.DsbtRegistry.credit_multiplier@8
+
+credit_multiplier_after_if_else@7:
+    // smart_contracts/dsbt_registry/contract.py:174
+    // return UInt64(1)
+    intc_1 // 1
+    // smart_contracts/dsbt_registry/contract.py:162
+    // @arc4.abimethod(readonly=True)
+    b credit_multiplier_after_inlined_smart_contracts.dsbt_registry.contract.DsbtRegistry.credit_multiplier@8
+
+
+// smart_contracts.dsbt_registry.contract.DsbtRegistry._apply(member: bytes, points: uint64, positive: uint64, on_time: uint64, late: uint64, defaulted: uint64) -> uint64:
+_apply:
+    // smart_contracts/dsbt_registry/contract.py:178-187
+    // @subroutine
+    // def _apply(
+    //     self,
+    //     member: Account,
+    //     points: UInt64,
+    //     positive: bool,
+    //     on_time: UInt64,
+    //     late: UInt64,
+    //     defaulted: UInt64,
+    // ) -> UInt64:
+    proto 6 1
+    intc_0 // 0
+    pushbytes ""
+    // smart_contracts/dsbt_registry/contract.py:189
+    // assert Txn.sender == self.admin or Txn.sender == self.oracle, "not authorised"
+    txn Sender
+    intc_0 // 0
+    bytec_2 // "admin"
+    app_global_get_ex
+    assert // check self.admin exists
+    ==
+    bnz _apply_bool_true@2
+    txn Sender
+    intc_0 // 0
+    bytec_3 // "oracle"
+    app_global_get_ex
+    assert // check self.oracle exists
+    ==
+    bz _apply_bool_false@3
+
+_apply_bool_true@2:
+    intc_1 // 1
+
+_apply_bool_merge@4:
+    // smart_contracts/dsbt_registry/contract.py:189
+    // assert Txn.sender == self.admin or Txn.sender == self.oracle, "not authorised"
+    assert // not authorised
+    // smart_contracts/dsbt_registry/contract.py:190
+    // assert member in self.passports, "no passport"
+    bytec_1 // 0x736274
+    frame_dig -6
+    concat
+    dup
+    frame_bury 0
+    dup
+    box_len
+    bury 1
+    assert // no passport
+    // smart_contracts/dsbt_registry/contract.py:192
+    // passport = self.passports[member].copy()
+    box_get
+    pop
+    dup
+    // smart_contracts/dsbt_registry/contract.py:193
+    // current: UInt64 = passport.score.native
+    intc_2 // 32
+    extract_uint64
+    // smart_contracts/dsbt_registry/contract.py:196
+    // if positive:
+    frame_dig -4
+    bz _apply_else_body@8
+    // smart_contracts/dsbt_registry/contract.py:197
+    // updated = current + points
+    frame_dig -5
+    +
+    dup
+    frame_bury 1
+    // smart_contracts/dsbt_registry/contract.py:198
+    // if updated > UInt64(1000):
+    intc 4 // 1000
+    >
+    bz _apply_after_if_else@12
+    // smart_contracts/dsbt_registry/contract.py:199
+    // updated = UInt64(1000)
+    intc 4 // 1000
+    frame_bury 1
+
+_apply_after_if_else@12:
+    // smart_contracts/dsbt_registry/contract.py:203
+    // passport.score = arc4.UInt64(updated)
+    frame_dig 1
+    dup
+    itob
+    uncover 2
+    swap
+    replace2 32
+    // smart_contracts/dsbt_registry/contract.py:204
+    // passport.tier = arc4.UInt64(self._tier_for(updated))
+    swap
+    callsub _tier_for
+    itob
+    replace2 40
+    // smart_contracts/dsbt_registry/contract.py:205
+    // passport.on_time_repayments = arc4.UInt64(passport.on_time_repayments.native + on_time)
+    dup
+    pushint 48
+    extract_uint64
+    frame_dig -3
+    +
+    itob
+    replace2 48
+    // smart_contracts/dsbt_registry/contract.py:206
+    // passport.late_repayments = arc4.UInt64(passport.late_repayments.native + late)
+    dup
+    pushint 56
+    extract_uint64
+    frame_dig -2
+    +
+    itob
+    replace2 56
+    // smart_contracts/dsbt_registry/contract.py:207
+    // passport.defaults = arc4.UInt64(passport.defaults.native + defaulted)
+    dup
+    pushint 64
+    extract_uint64
+    frame_dig -1
+    +
+    itob
+    replace2 64
+    // smart_contracts/dsbt_registry/contract.py:208
+    // passport.updated_round = arc4.UInt64(Global.round)
+    global Round
+    itob
+    replace2 88
+    // smart_contracts/dsbt_registry/contract.py:210-211
+    // # A default breaks the deposit streak.
+    // if defaulted > UInt64(0):
+    frame_dig -1
+    bz _apply_after_if_else@14
+    // smart_contracts/dsbt_registry/contract.py:212
+    // passport.deposit_streak = arc4.UInt64(0)
+    intc_0 // 0
+    itob
+    replace2 72
+
+_apply_after_if_else@14:
+    // smart_contracts/dsbt_registry/contract.py:214
+    // self.passports[member] = passport.copy()
+    frame_dig 0
+    swap
+    box_put
+    // smart_contracts/dsbt_registry/contract.py:215
+    // return updated
+    frame_dig 1
+    frame_bury 0
+    retsub
+
+_apply_else_body@8:
+    // smart_contracts/dsbt_registry/contract.py:201
+    // updated = current - points if current > points else UInt64(0)
+    dup
+    frame_dig -5
+    >
+    bz _apply_ternary_false@10
+    frame_dig -5
+    -
+    frame_bury 1
+    b _apply_after_if_else@12
+
+_apply_ternary_false@10:
+    pop
+    // smart_contracts/dsbt_registry/contract.py:201
+    // updated = current - points if current > points else UInt64(0)
+    intc_0 // 0
+    frame_bury 1
+    b _apply_after_if_else@12
+
+_apply_bool_false@3:
+    intc_0 // 0
+    b _apply_bool_merge@4
+
+
+// smart_contracts.dsbt_registry.contract.DsbtRegistry._tier_for(score: uint64) -> uint64:
+_tier_for:
+    // smart_contracts/dsbt_registry/contract.py:217-218
+    // @subroutine
+    // def _tier_for(self, score: UInt64) -> UInt64:
+    proto 1 1
+    // smart_contracts/dsbt_registry/contract.py:219
+    // if score >= UInt64(900):
+    frame_dig -1
+    pushint 900
+    >=
+    bz _tier_for_after_if_else@2
+    // smart_contracts/dsbt_registry/contract.py:220
+    // return UInt64(TIER_PLATINUM)
+    intc_3 // 3
+    retsub
+
+_tier_for_after_if_else@2:
+    // smart_contracts/dsbt_registry/contract.py:221
+    // if score >= UInt64(800):
+    frame_dig -1
+    pushint 800
+    >=
+    bz _tier_for_after_if_else@4
+    // smart_contracts/dsbt_registry/contract.py:222
+    // return UInt64(TIER_GOLD)
+    pushint 2
+    retsub
+
+_tier_for_after_if_else@4:
+    // smart_contracts/dsbt_registry/contract.py:223
+    // if score >= UInt64(650):
+    frame_dig -1
+    pushint 650
+    >=
+    bz _tier_for_after_if_else@6
+    // smart_contracts/dsbt_registry/contract.py:224
+    // return UInt64(TIER_SILVER)
+    intc_1 // 1
+    retsub
+
+_tier_for_after_if_else@6:
+    // smart_contracts/dsbt_registry/contract.py:225
+    // return UInt64(TIER_BRONZE)
+    intc_0 // 0
+    retsub

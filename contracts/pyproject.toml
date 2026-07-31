@@ -1,0 +1,24 @@
+[project]
+name = "saheli-shg-contracts"
+version = "1.0.0"
+description = "Algorand smart contracts for the Saheli SHG Chain: multi-sig treasury, x402 gateway, and dynamic Soulbound credit passports."
+requires-python = ">=3.12"
+dependencies = [
+    "algorand-python>=2.0.0",
+    "algokit-utils>=3.0.0",
+    "python-dotenv>=1.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "algorand-python-testing>=0.4.0",
+    "pytest>=8.0.0",
+    "ruff>=0.6.0",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
