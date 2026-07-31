@@ -127,9 +127,52 @@ async function resolveDestination(req: PreparePaymentRequest): Promise<string> {
 }
 
 /**
- * Builds the unsigned payment. Throws with a readable message when the payer
- * cannot actually cover it, so the UI can tell the user to top up rather than
- * surfacing a raw algod rejection after they have already signed.
+ * Algorand's account minimum balance: 0.1 ALGO. An account may never drop below
+ * it, and — crucially — a payment that would leave the *receiver* below it is
+ * rejected by the transaction pool too. That is why sending 0.05 ALGO to a
+ * never-funded treasury fails with "balance 50000 below min 100000".
+ */
+const MIN_ACCOUNT_BALANCE = 100_000;
+const TXN_FEE = 1_000;
+
+/** Live balance, or 0 for an account that has never been funded. */
+async function readBalance(address: string): Promise<number> {
+  try {
+    const info: any = await getAlgodClient().accountInformation(address).do();
+    return Number(info?.amount ?? 0);
+  } catch (err) {
+    // algod 404s on an account with no on-chain history; that is a zero balance,
+    // not an outage. Anything else is a genuine connectivity problem.
+    const message = err instanceof Error ? err.message : String(err);
+    if (/404|no accounts found|account does not exist/i.test(message)) return 0;
+    throw Object.assign(
+      new Error(
+        `Could not read ${address} on Algorand ${getNetwork()}. ` +
+          'Check the wallet is on the same network as the API.',
+      ),
+      { name: 'ValidationError', cause: err },
+    );
+  }
+}
+
+/**
+ * Smallest transfer that will actually be accepted, given how much the receiver
+ * already holds. A funded receiver can accept any amount; an empty one must be
+ * brought to 0.1 ALGO in a single payment.
+ */
+export function minimumTransferInr(receiverBalanceMicroAlgos: number): number {
+  const shortfall = Math.max(0, MIN_ACCOUNT_BALANCE - receiverBalanceMicroAlgos);
+  if (shortfall === 0) return 1;
+  return Math.ceil(shortfall / getInrToMicroAlgo());
+}
+
+/**
+ * Builds the unsigned payment.
+ *
+ * Both sides are pre-flighted here so the user is never asked to approve
+ * something in Pera that the network will then refuse: the payer must be able
+ * to cover the transfer, the fee and its own minimum balance, and the transfer
+ * must leave the receiver at or above the minimum balance too.
  */
 export async function preparePayment(req: PreparePaymentRequest): Promise<PreparedPayment> {
   assertAddress(req.fromAddress, 'fromAddress');
@@ -147,22 +190,32 @@ export async function preparePayment(req: PreparePaymentRequest): Promise<Prepar
   const client = getAlgodClient();
   const amountMicroAlgos = inrToMicroAlgos(amountInr);
 
-  // Fail fast on an underfunded payer: min balance is 0.1 ALGO plus the fee.
-  let payerBalance = 0;
-  try {
-    const info: any = await client.accountInformation(req.fromAddress).do();
-    payerBalance = Number(info?.amount ?? 0);
-  } catch (err) {
+  const [payerBalance, receiverBalance] = await Promise.all([
+    readBalance(req.fromAddress),
+    readBalance(toAddress),
+  ]);
+
+  // ── Receiver side, checked first ──
+  // Algorand refuses to leave any account below 0.1 ALGO, so a first payment
+  // into an empty account must carry it over that line in one go. This is
+  // reported ahead of the payer check because it is about the amount the user
+  // just typed — the one thing they can fix without leaving the app.
+  if (receiverBalance + amountMicroAlgos < MIN_ACCOUNT_BALANCE) {
+    const minInr = minimumTransferInr(receiverBalance);
     throw Object.assign(
       new Error(
-        `Could not read ${req.fromAddress} on Algorand ${getNetwork()}. ` +
-          'Check the wallet is on the same network as the API.',
+        `The destination account has only ${(receiverBalance / 1e6).toFixed(4)} ALGO and Algorand requires every ` +
+          `account to hold at least 0.1 ALGO. ₹${Math.round(amountInr).toLocaleString('en-IN')} is ` +
+          `${(amountMicroAlgos / 1e6).toFixed(4)} ALGO, which would leave it below that minimum, so the network ` +
+          `would reject it. Send at least ₹${minInr.toLocaleString('en-IN')}, or fund ${toAddress.slice(0, 8)}… ` +
+          `once at https://bank.testnet.algorand.network and any amount will work after that.`,
       ),
-      { name: 'ValidationError', cause: err },
+      { name: 'ValidationError', minimumInr: minInr, receiverBalance },
     );
   }
 
-  const required = amountMicroAlgos + 1_000 + 100_000;
+  // ── Payer side ──
+  const required = amountMicroAlgos + TXN_FEE + MIN_ACCOUNT_BALANCE;
   if (payerBalance < required) {
     throw Object.assign(
       new Error(
@@ -230,6 +283,49 @@ export interface SubmittedPayment {
 }
 
 /**
+ * Turns an algod rejection into something a user can act on.
+ *
+ * Raw pool errors read like `TransactionPool.Remember: transaction ABC…:
+ * account XYZ… balance 50000 below min 100000 (0 assets)`, which tells a rural
+ * SHG member precisely nothing. State can change between prepare and submit, so
+ * these still surface even with the pre-flight checks above.
+ */
+function explainAlgodRejection(detail: string): string {
+  const belowMin = detail.match(/account ([A-Z2-7]{58}) balance (\d+) below min (\d+)/);
+  if (belowMin) {
+    const [, address, balance, min] = belowMin;
+    const shortfallInr = Math.ceil((Number(min) - Number(balance)) / getInrToMicroAlgo());
+    return (
+      `Algorand refused the transfer: it would leave ${address.slice(0, 8)}… holding ` +
+      `${(Number(balance) / 1e6).toFixed(4)} ALGO, below the 0.1 ALGO every account must keep. ` +
+      `Send ₹${shortfallInr.toLocaleString('en-IN')} more, or fund that address once at ` +
+      `https://bank.testnet.algorand.network and any amount will work afterwards.`
+    );
+  }
+
+  if (/overspend/i.test(detail)) {
+    return (
+      'Algorand refused the transfer: the wallet does not hold enough ALGO to cover the amount plus the ' +
+      'network fee and its own 0.1 ALGO minimum balance. Top up at https://bank.testnet.algorand.network.'
+    );
+  }
+
+  if (/txn dead|round.*expired|LastValid/i.test(detail)) {
+    return 'The transaction expired before it was submitted (Algorand transactions are valid for ~1000 rounds). Try again.';
+  }
+
+  if (/transaction already in ledger/i.test(detail)) {
+    return 'This transaction was already submitted and settled. Refresh to see it in the ledger.';
+  }
+
+  if (/signature|not authorized|auth/i.test(detail)) {
+    return 'The signature did not match the sending address. Make sure Pera Wallet is on the same account and network as the app.';
+  }
+
+  return `Algorand rejected the transaction: ${detail}`;
+}
+
+/**
  * Broadcasts the wallet-signed transaction and, only once the chain has
  * confirmed it, writes the ledger row and moves the in-app balances.
  *
@@ -257,7 +353,7 @@ export async function submitPayment(params: {
     txId = String(sent?.txid ?? sent?.txId ?? '');
   } catch (err) {
     const detail = err instanceof Error ? err.message : 'broadcast failed';
-    throw Object.assign(new Error(`Algorand rejected the transaction: ${detail}`), { name: 'ValidationError' });
+    throw Object.assign(new Error(explainAlgodRejection(detail)), { name: 'ValidationError' });
   }
 
   if (!txId) {
@@ -372,6 +468,67 @@ export async function submitPayment(params: {
     message:
       `Settled on Algorand ${getNetwork()} in round ${confirmedRound}. ` +
       `${(amountMicroAlgos / 1e6).toFixed(4)} ALGO (₹${amountInr.toLocaleString('en-IN')}) debited from ${from.slice(0, 8)}….`,
+  };
+}
+
+/**
+ * Everything the UI needs to size a payment correctly before the user commits:
+ * what each side holds and the smallest amount the network will accept.
+ *
+ * Exists so the minimum-balance rule is explained *up front* rather than as a
+ * rejection after the user has already approved something in Pera.
+ */
+export async function quotePayment(req: {
+  fromAddress?: string;
+  toAddress?: string;
+  toMemberId?: string;
+}): Promise<{
+  from: { address: string; algos: number; funded: boolean } | null;
+  to: { address: string; algos: number; funded: boolean };
+  minimumInr: number;
+  maximumInr: number | null;
+  microAlgosPerInr: number;
+  reason: string;
+}> {
+  const toAddress = await resolveDestination({
+    fromAddress: req.fromAddress || getTreasuryAddress(),
+    toAddress: req.toAddress,
+    toMemberId: req.toMemberId,
+    amountInr: 1,
+    purpose: 'deposit',
+  });
+
+  const [receiverBalance, payerBalance] = await Promise.all([
+    readBalance(toAddress),
+    req.fromAddress ? readBalance(req.fromAddress) : Promise.resolve(0),
+  ]);
+
+  const minimumInr = minimumTransferInr(receiverBalance);
+
+  // The most the payer can send while keeping its own minimum balance and fee.
+  const spendable = Math.max(0, payerBalance - MIN_ACCOUNT_BALANCE - TXN_FEE);
+  const maximumInr = req.fromAddress ? Math.floor(spendable / getInrToMicroAlgo()) : null;
+
+  return {
+    from: req.fromAddress
+      ? {
+          address: req.fromAddress,
+          algos: Number((payerBalance / 1e6).toFixed(6)),
+          funded: payerBalance >= MIN_ACCOUNT_BALANCE,
+        }
+      : null,
+    to: {
+      address: toAddress,
+      algos: Number((receiverBalance / 1e6).toFixed(6)),
+      funded: receiverBalance >= MIN_ACCOUNT_BALANCE,
+    },
+    minimumInr,
+    maximumInr,
+    microAlgosPerInr: getInrToMicroAlgo(),
+    reason:
+      receiverBalance < MIN_ACCOUNT_BALANCE
+        ? `The destination has never been funded, so the first payment must carry it to Algorand's 0.1 ALGO minimum — at least ₹${minimumInr.toLocaleString('en-IN')}.`
+        : 'Destination is funded; any amount within your balance will settle.',
   };
 }
 

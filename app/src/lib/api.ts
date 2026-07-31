@@ -313,6 +313,25 @@ export const algorandApi = {
   getBalance: (address: string) => apiFetch<any>(`/algorand/balance/${address}`),
   getRate: () => apiFetch<any>('/algorand/rate'),
 
+  /**
+   * What both sides hold and the smallest amount Algorand will accept.
+   * Fetched before the user types, so the 0.1 ALGO minimum-balance rule is
+   * explained up front instead of rejecting them after they have signed.
+   */
+  getPaymentQuote: (params: { fromAddress?: string; toAddress?: string; toMemberId?: string }) => {
+    const query = new URLSearchParams(
+      Object.entries(params).filter(([, v]) => Boolean(v)) as [string, string][],
+    ).toString();
+    return apiFetch<{
+      from: { address: string; algos: number; funded: boolean } | null;
+      to: { address: string; algos: number; funded: boolean };
+      minimumInr: number;
+      maximumInr: number | null;
+      microAlgosPerInr: number;
+      reason: string;
+    }>(`/algorand/payment/quote${query ? `?${query}` : ''}`);
+  },
+
   /** Step 1 of a real wallet payment: the server builds the unsigned txn. */
   preparePayment: (body: {
     fromAddress: string;

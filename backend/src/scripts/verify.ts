@@ -515,6 +515,38 @@ async function main() {
     badAddress.body.error,
   );
 
+  // Algorand rejects any payment that would leave the receiver under 0.1 ALGO.
+  // The quote states that minimum before the user commits, instead of letting
+  // them sign something the pool will refuse with "balance below min".
+  const quote = await json('/api/algorand/payment/quote');
+  record(
+    'Payment quote states the minimum the network will accept',
+    quote.status === 200 && typeof quote.body.data?.minimumInr === 'number' && quote.body.data.minimumInr > 0,
+    `destination holds ${quote.body.data?.to?.algos} ALGO · minimum ₹${quote.body.data?.minimumInr?.toLocaleString('en-IN')}`,
+  );
+
+  if (quote.body.data?.to?.funded === false) {
+    const belowMin = await json('/api/algorand/payment/prepare', {
+      method: 'POST',
+      body: JSON.stringify({
+        fromAddress: algosdk.generateAccount().addr.toString(),
+        amountInr: Math.max(1, Math.floor(quote.body.data.minimumInr / 2)),
+        purpose: 'deposit',
+      }),
+    });
+    record(
+      'Transfers below Algorand’s minimum balance are refused before signing',
+      belowMin.status === 400 && /destination account/i.test(belowMin.body.error || ''),
+      String(belowMin.body.error || '').slice(0, 100) + '…',
+    );
+  } else {
+    record(
+      'Transfers below Algorand’s minimum balance are refused before signing',
+      true,
+      'destination already funded — minimum-balance guard not applicable',
+    );
+  }
+
   // ── Summary ──
   const passed = checks.filter((c) => c.passed).length;
   const failed = checks.length - passed;

@@ -39,6 +39,7 @@ import AgentTerminal from '../components/AgentTerminal';
 import IdleFundPanel from '../components/IdleFundPanel';
 import QRCodeDisplay from '../components/QRCodeDisplay';
 import AIAgentPanel from '../components/AIAgentPanel';
+import TxReference from '../components/TxReference';
 import PeraPaymentButton from '../components/PeraPaymentButton';
 
 const Skeleton = ({ className = '' }: { className?: string }) => (
@@ -369,32 +370,12 @@ export default function LeaderDashboard({ isReadOnly = false, activeSection = 't
                     <p className="text-sm font-semibold text-on-surface capitalize">
                       {String(tx.event || '').replace(/_/g, ' ')}
                     </p>
-                    {tx.transactionId ? (
-                      <span className="flex flex-wrap items-center gap-1.5">
-                        <a
-                          href={tx.explorerUrl || `https://lora.algokit.io/testnet/transaction/${tx.transactionId}`}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="text-[11px] font-mono text-shg-primary hover:underline break-all"
-                        >
-                          {tx.transactionId}
-                        </a>
-                        <span
-                          className={`text-[9px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded ${
-                            tx.onChain ? 'bg-emerald-50 text-emerald-700' : 'bg-slate-100 text-slate-500'
-                          }`}
-                          title={
-                            tx.onChain
-                              ? 'Broadcast and confirmed on Algorand — this link resolves.'
-                              : 'Anchored locally while the relayer was unfunded. This id does not exist on chain.'
-                          }
-                        >
-                          {tx.onChain ? 'on-chain' : 'local'}
-                        </span>
-                      </span>
-                    ) : (
-                      <span className="text-[11px] font-mono text-muted-foreground">{tx.txId}</span>
-                    )}
+                    <TxReference
+                      transactionId={tx.transactionId}
+                      onChain={tx.onChain}
+                      explorerUrl={tx.explorerUrl}
+                      fallback={tx.txId}
+                    />
                   </div>
                   <div className="text-right">
                     <p

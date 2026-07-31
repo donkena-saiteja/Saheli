@@ -21,6 +21,7 @@ import {
   getInrToMicroAlgo,
   getWalletBalance,
   preparePayment,
+  quotePayment,
   submitPayment,
 } from '../services/walletPayments';
 
@@ -105,6 +106,22 @@ router.get('/rate', async (_req: Request, res: Response) => {
       note: 'Demo settlement peg for TestNet peer-to-peer transfers. Configure with INR_TO_MICROALGO.',
     },
   });
+});
+
+/**
+ * GET /api/algorand/payment/quote?fromAddress=&toMemberId=&toAddress=
+ *
+ * What both sides hold and the smallest amount the network will accept. Lets
+ * the UI state the minimum before the user types, instead of surfacing
+ * Algorand's minimum-balance rule as a rejection after they have signed.
+ */
+router.get('/payment/quote', async (req: Request, res: Response) => {
+  const quote = await quotePayment({
+    fromAddress: req.query.fromAddress ? String(req.query.fromAddress) : undefined,
+    toAddress: req.query.toAddress ? String(req.query.toAddress) : undefined,
+    toMemberId: req.query.toMemberId ? String(req.query.toMemberId) : undefined,
+  });
+  res.json({ success: true, data: quote });
 });
 
 /**

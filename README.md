@@ -413,6 +413,27 @@ Two things this buys:
 
 Rupees settle against a demo peg (`INR_TO_MICROALGO`, default ₹1 = 0.0001 ALGO), so a single 10-ALGO dispenser top-up covers ₹100,000 of demo movement.
 
+### The 0.1 ALGO minimum balance — why a small first payment is refused
+
+Algorand requires **every** account to hold at least 0.1 ALGO, and the transaction pool rejects any payment that would leave the *receiver* below that line. At the default peg, ₹500 is only 0.05 ALGO — so the very first payment into a never-funded treasury fails with:
+
+```
+TransactionPool.Remember: account A7CHNC2C… balance 50000 below min 100000
+```
+
+Saheli pre-flights **both sides** before building the transaction, so this surfaces as a clear message *before* anything is signed, never as a rejection afterwards:
+
+```bash
+curl "http://127.0.0.1:3001/api/algorand/payment/quote"
+```
+
+```json
+{ "to": { "algos": 0, "funded": false }, "minimumInr": 1000,
+  "reason": "The destination has never been funded, so the first payment must carry it to Algorand's 0.1 ALGO minimum — at least ₹1,000." }
+```
+
+The payment button reads that quote, states the minimum inline and stays disabled below it. Two ways past it: send at least the stated minimum, or fund the destination address once at the dispenser — after which any amount works. Raw pool errors are also translated into plain English at submit time, since state can change between prepare and submit.
+
 | Where | What it does |
 |---|---|
 | Member → *My Pera Wallet* | Deposit savings, repay a loan — debits the member's wallet |
@@ -465,7 +486,7 @@ Copy `relayer.address`, paste it into the [TestNet dispenser](https://bank.testn
 
 Any *Pay from Pera Wallet* button builds the payment server-side, has Pera sign it on your device, broadcasts it, and waits for confirmation before touching the ledger. Those ids are always real. Fund your own Pera TestNet account at the same dispenser.
 
-**Telling them apart in the UI:** every ledger row carries a badge — `on-chain` (green, the link resolves) or `local` (grey, it does not). Nothing is ever presented as on-chain when it isn't.
+**Telling them apart in the UI:** every ledger row carries a badge. `on-chain` (green) renders as a clickable explorer link because it resolves; `local only` (grey) renders as plain text, because linking an id that was never broadcast just produces a "Transaction not found" page and a console 404. Nothing is ever presented as on-chain when it isn't.
 
 ```bash
 # Which mode am I in, and why?

@@ -33,6 +33,7 @@ import { membersApi, qrApi, agentApi, reportsApi, algorandApi } from '../lib/api
 import QRCodeDisplay from '../components/QRCodeDisplay';
 import LoanRequestModal from '../components/LoanRequestModal';
 import AIAgentPanel from '../components/AIAgentPanel';
+import TxReference from '../components/TxReference';
 import PeraPaymentButton from '../components/PeraPaymentButton';
 import { toast } from 'sonner';
 import { useAuth } from '../contexts/AuthContext';
@@ -467,30 +468,11 @@ export default function MemberDashboard({ activeSection = 'passport', onOpenAIAs
                       {new Date(tx.createdAt).toLocaleString('en-IN')}
                     </p>
                     {tx.transactionId && (
-                      <span className="flex flex-wrap items-center gap-1.5 mt-1">
-                        <a
-                          href={`https://lora.algokit.io/testnet/transaction/${tx.transactionId}`}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="text-[11px] font-mono text-shg-primary hover:underline break-all"
-                        >
-                          {tx.transactionId}
-                        </a>
-                        <span
-                          className={`text-[9px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded ${
-                            tx.settlementMode === 'live'
-                              ? 'bg-emerald-50 text-emerald-700'
-                              : 'bg-slate-100 text-slate-500'
-                          }`}
-                          title={
-                            tx.settlementMode === 'live'
-                              ? 'Confirmed on Algorand — this link resolves.'
-                              : 'Anchored locally while the relayer was unfunded. This id does not exist on chain.'
-                          }
-                        >
-                          {tx.settlementMode === 'live' ? 'on-chain' : 'local'}
-                        </span>
-                      </span>
+                      <TxReference
+                        className="mt-1"
+                        transactionId={tx.transactionId}
+                        onChain={tx.settlementMode === 'live'}
+                      />
                     )}
                   </div>
                   <div className="text-right">
