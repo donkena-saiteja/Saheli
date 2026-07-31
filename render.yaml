@@ -1,0 +1,105 @@
+# Render Blueprint — one-click deploy for Saheli.
+#
+# Deploys the whole product as a SINGLE web service: the compiled Express API
+# also serves the built React bundle from app/dist. On Render's free tier this
+# is strictly better than two services — one cold start instead of two, one
+# HTTPS URL, and no CORS to misconfigure.
+#
+# Usage: Render Dashboard → New → Blueprint → pick this repo.
+#
+# Two variables must be filled in by hand (they are secrets or only known after
+# the first deploy) — see DEPLOY.md.
+
+services:
+  - type: web
+    name: saheli
+    runtime: node
+    plan: free
+    # Closest region to India; change if your judges are elsewhere.
+    region: singapore
+    healthCheckPath: /health
+
+    # `--include=dev` is deliberate. NODE_ENV=production makes npm skip
+    # devDependencies, and TypeScript lives there — without this flag the
+    # build fails with "tsc: not found".
+    buildCommand: >-
+      npm --prefix app install --include=dev &&
+      npm --prefix app run build &&
+      npm --prefix backend install --include=dev &&
+      npm --prefix backend run build
+
+    # Resolves app/dist relative to backend/dist at runtime.
+    startCommand: node backend/dist/index.js
+
+    envVars:
+      - key: NODE_VERSION
+        value: "20.18.0"
+
+      - key: NODE_ENV
+        value: production
+
+      # ── Required, set these yourself ──────────────────────────────────────
+      # MongoDB Atlas connection string. WITHOUT THIS the API starts with no
+      # database and every /api route returns 503 — the in-process fallback is
+      # a devDependency and is not installed in production.
+      - key: MONGODB_URI
+        sync: false
+
+      # Long random string. Render can generate one for you.
+      - key: JWT_SECRET
+        generateValue: true
+
+      # ── Recommended ───────────────────────────────────────────────────────
+      # Makes a missing/bad MONGODB_URI fail loudly instead of silently
+      # starting an ephemeral database that is wiped on every restart.
+      - key: USE_MEMORY_DB
+        value: "false"
+
+      # Paste your service URL here after the first deploy, e.g.
+      # https://saheli.onrender.com — used for QR proof links and the Twilio
+      # webhook signature check.
+      - key: PUBLIC_BASE_URL
+        sync: false
+
+      # ── Algorand ──────────────────────────────────────────────────────────
+      - key: ALGORAND_NETWORK
+        value: testnet
+      - key: ALGOD_SERVER
+        value: https://testnet-api.algonode.cloud
+      - key: INDEXER_SERVER
+        value: https://testnet-idx.algonode.cloud
+
+      # 25-word mnemonic for a FUNDED TestNet account. Leave blank to use the
+      # deterministic derived relayer, then fund the address shown at
+      # /api/algorand/info. Without funds every txid stays "simulated" and
+      # nothing resolves on the Lora explorer.
+      - key: ALGORAND_RELAYER_MNEMONIC
+        sync: false
+
+      # Demo peg: ₹1 settles as 100 microAlgos in Pera-signed payments.
+      - key: INR_TO_MICROALGO
+        value: "100"
+
+      # ── AI agent (optional) ───────────────────────────────────────────────
+      # Without a key the agent still detects fraud and allocates funds using
+      # its deterministic rule engine; this adds LLM reasoning and Q&A.
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: OPENAI_CHAT_MODEL
+        value: gpt-4o-mini
+      - key: AI_MONITOR_INTERVAL_MS
+        value: "300000"
+
+      # ── x402 ──────────────────────────────────────────────────────────────
+      # Blank uses the built-in local facilitator, so the mandatory feature
+      # cannot be broken by third-party downtime during judging.
+      - key: X402_FACILITATOR_URL
+        sync: false
+
+      # ── WhatsApp (optional) ───────────────────────────────────────────────
+      - key: TWILIO_ACCOUNT_SID
+        sync: false
+      - key: TWILIO_AUTH_TOKEN
+        sync: false
+      - key: TWILIO_WHATSAPP_FROM
+        value: whatsapp:+14155238886
