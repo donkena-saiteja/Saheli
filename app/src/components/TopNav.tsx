@@ -1,7 +1,9 @@
-import { Search, Bell, Bot, User, Menu, X, LogOut } from 'lucide-react';
+import { Search, Bell, Bot, User, Menu, X, LogOut, Wallet, Loader2 } from 'lucide-react';
 import { useMemo, useState } from 'react';
 import { useApiPolling } from '../hooks/useApi';
 import { aiAgentApi } from '../lib/api';
+import { useAuth } from '../contexts/AuthContext';
+import { isUserCancellation, shortenAddress } from '../lib/pera';
 import { toast } from 'sonner';
 
 type UserRole = 'member' | 'leader' | 'bank';
@@ -27,7 +29,32 @@ export default function TopNav({ currentRole, onOpenAIAssistant, onSignOut, onSe
     bank:   'Bank/NGO',
   };
 
+  const { user, walletAddress, walletConnecting, linkPeraWallet, disconnectWallet } = useAuth();
+  const linkedWallet = user?.walletAddress || walletAddress;
+
   const { data: aiLog } = useApiPolling(() => aiAgentApi.getLog(), 10000);
+
+  const handleWalletClick = async () => {
+    if (user?.walletAddress) {
+      toast.info(`Wallet linked: ${user.walletAddress}`);
+      return;
+    }
+    if (walletAddress) {
+      await disconnectWallet();
+      toast.info('Pera Wallet disconnected.');
+      return;
+    }
+    try {
+      const address = await linkPeraWallet();
+      toast.success(`Pera Wallet linked: ${shortenAddress(address)}`);
+    } catch (err) {
+      if (isUserCancellation(err)) {
+        toast.info('Pera Wallet request cancelled.');
+      } else {
+        toast.error((err as Error).message || 'Could not link Pera Wallet');
+      }
+    }
+  };
 
   const notifications = useMemo(
     () =>
@@ -127,12 +154,34 @@ export default function TopNav({ currentRole, onOpenAIAssistant, onSignOut, onSe
             <Bot className="w-5 h-5 text-shg-primary" />
           </button>
 
+          {/* Pera Wallet — shows the linked address, or offers to link one */}
+          {currentRole && (
+            <button
+              onClick={handleWalletClick}
+              disabled={walletConnecting}
+              title={linkedWallet ? linkedWallet : 'Connect your Pera Wallet'}
+              className={`hidden sm:flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs font-bold transition-colors disabled:opacity-60 ${
+                linkedWallet
+                  ? 'bg-emerald-50 text-emerald-700 hover:bg-emerald-100'
+                  : 'bg-surface text-muted-foreground hover:text-shg-primary'
+              }`}
+            >
+              {walletConnecting ? (
+                <Loader2 className="w-4 h-4 animate-spin" />
+              ) : (
+                <Wallet className="w-4 h-4" />
+              )}
+              <span className="font-mono">
+                {linkedWallet ? shortenAddress(linkedWallet) : 'Connect Pera'}
+              </span>
+            </button>
+          )}
+
           {/* Account */}
-          <div className="w-8 h-8 rounded-full bg-shg-primary/10 flex items-center justify-center">
-            <User className="w-4 h-4 text-shg-primary" />
-          </div>
-          {/* Account */}
-          <div className="w-8 h-8 rounded-full bg-shg-primary/10 flex items-center justify-center">
+          <div
+            className="w-8 h-8 rounded-full bg-shg-primary/10 flex items-center justify-center"
+            title={user?.name}
+          >
             <User className="w-4 h-4 text-shg-primary" />
           </div>
 

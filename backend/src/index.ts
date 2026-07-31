@@ -1,4 +1,10 @@
 import express from 'express';
+// Express 4 does not forward rejected promises from async route handlers to the
+// error middleware — they surface as unhandled rejections, which terminate the
+// process on modern Node. This patch routes them to the handler below instead,
+// so one bad database call returns a 500 rather than taking the API down.
+// Must be imported before any router is defined.
+import 'express-async-errors';
 import cors from 'cors';
 import dotenv from 'dotenv';
 import path from 'path';
@@ -198,6 +204,26 @@ app.use((_req, res) => {
   res.status(404).json({ success: false, error: 'Endpoint not found' });
 });
 
+// ─── Error Handler ──────────────────────────────────────────────────────────
+// Last line of defence: anything a route throws (sync or async) lands here as a
+// JSON 500 instead of a hung request or a dead process.
+app.use((err: any, req: express.Request, res: express.Response, _next: express.NextFunction) => {
+  console.error(`[error] ${req.method} ${req.originalUrl}:`, err?.stack || err);
+
+  if (res.headersSent) return;
+
+  // Mongoose validation and cast failures are the caller's fault, not ours.
+  const status = err?.name === 'ValidationError' || err?.name === 'CastError' ? 400 : 500;
+
+  res.status(status).json({
+    success: false,
+    error:
+      process.env.NODE_ENV === 'production' && status === 500
+        ? 'Internal server error'
+        : err?.message || 'Internal server error',
+  });
+});
+
 // ─── Start ──────────────────────────────────────────────────────────────────
 const server = app.listen(PORT, () => {
   console.log(`\n Saheli Saheli API running on http://localhost:${PORT}`);
@@ -220,6 +246,17 @@ const shutdown = () => {
 
 process.on('SIGTERM', shutdown);
 process.on('SIGINT', shutdown);
+
+// Background work (timers, chain calls, agent ticks) lives outside the request
+// cycle, so express-async-errors cannot catch it. Log and keep serving rather
+// than letting a stray rejection end the demo.
+process.on('unhandledRejection', (reason) => {
+  console.error('[unhandledRejection]', reason instanceof Error ? reason.stack : reason);
+});
+
+process.on('uncaughtException', (err) => {
+  console.error('[uncaughtException]', err?.stack || err);
+});
 
 // Safety net: catch port-in-use errors early
 server.on('error', (err: NodeJS.ErrnoException) => {

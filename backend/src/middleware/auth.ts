@@ -7,27 +7,32 @@ export interface AuthRequest extends Request {
 }
 
 export const protect = async (req: AuthRequest, res: Response, next: NextFunction) => {
-  let token;
+  const header = req.headers.authorization;
 
-  if (req.headers.authorization && req.headers.authorization.startsWith('Bearer')) {
-    try {
-      token = req.headers.authorization.split(' ')[1];
-      const decoded: any = jwt.verify(token, process.env.JWT_SECRET || 'saheli_secret_key_123');
-      
-      req.user = await User.findById(decoded.id).select('-password');
-      if (!req.user) {
-         return res.status(401).json({ success: false, error: 'User not found' });
-      }
-      next();
-    } catch (error) {
-      console.error(error);
-      return res.status(401).json({ success: false, error: 'Not authorized, token failed' });
-    }
+  if (!header || !header.startsWith('Bearer ')) {
+    return res.status(401).json({ success: false, error: 'Not authorized, no token' });
   }
 
+  const token = header.slice('Bearer '.length).trim();
   if (!token) {
     return res.status(401).json({ success: false, error: 'Not authorized, no token' });
   }
+
+  try {
+    const decoded: any = jwt.verify(token, process.env.JWT_SECRET || 'saheli_secret_key_123');
+
+    req.user = await User.findById(decoded.id).select('-password');
+    if (!req.user) {
+      return res.status(401).json({ success: false, error: 'User not found' });
+    }
+  } catch {
+    // Expired or tampered token — no stack trace needed, this is routine.
+    return res.status(401).json({ success: false, error: 'Not authorized, token failed' });
+  }
+
+  // Outside the try, so an error thrown downstream is not misreported as an
+  // authentication failure (and cannot trigger a second res.status call).
+  return next();
 };
 
 // Role-Based Access Control (RBAC)

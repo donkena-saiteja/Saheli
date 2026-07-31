@@ -1,9 +1,10 @@
 import { useState } from 'react';
 import { toast } from 'sonner';
 import { useAuth } from '../contexts/AuthContext';
+import { isUserCancellation, shortenAddress } from '../lib/pera';
 import {
   Verified, Landmark, Users, Eye, EyeOff, ArrowRight,
-  Phone, Lock, User, ShieldCheck, Loader2, Link2
+  Phone, Lock, User, ShieldCheck, Loader2, Link2, Wallet
 } from 'lucide-react';
 
 type Role = 'member' | 'leader' | 'bank';
@@ -53,7 +54,7 @@ const ROLES = [
 ];
 
 export default function AuthPage({ onSuccess }: AuthPageProps) {
-  const { login, register, logout } = useAuth();
+  const { login, register, logout, loginWithPera, walletAddress, walletConnecting } = useAuth();
   const [mode, setMode] = useState<Mode>('login');
   const [role, setRole] = useState<Role>('member');
   const [showPass, setShowPass] = useState(false);
@@ -100,6 +101,39 @@ export default function AuthPage({ onSuccess }: AuthPageProps) {
     setForm(f => ({ ...f, phone: selectedRole.demoPhone, password: 'demo1234' }));
     toast.info('Demo credentials filled!');
   };
+
+  /**
+   * Pera Wallet sign-in. The wallet signs a server-issued nonce; no password
+   * is created and no key leaves the device. First signature for an address
+   * creates the account with the currently selected role.
+   */
+  const handlePeraSignIn = async () => {
+    setLoading(true);
+    try {
+      const user = await loginWithPera({
+        role,
+        name: form.name.trim() || undefined,
+        shgId: form.shgId.trim() || undefined,
+      });
+
+      if (user.isNewAccount) {
+        toast.success(`Wallet verified — account created as ${user.role.toUpperCase()} 🎉`);
+      } else {
+        toast.success(`Welcome back, ${user.name}! 🔐`);
+      }
+      onSuccess(user.role as Role);
+    } catch (err) {
+      if (isUserCancellation(err)) {
+        toast.info('Pera Wallet request cancelled.');
+      } else {
+        toast.error((err as Error).message || 'Pera Wallet sign-in failed');
+      }
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const busy = loading || walletConnecting;
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-900 via-blue-950 to-indigo-950 flex items-center justify-center p-4">
@@ -261,7 +295,7 @@ export default function AuthPage({ onSuccess }: AuthPageProps) {
                 </button>
                 <button
                   type="submit"
-                  disabled={loading}
+                  disabled={busy}
                   className={`flex-1 flex items-center justify-center gap-2 bg-gradient-to-r ${selectedRole.gradient} text-white py-3.5 rounded-xl font-bold text-sm transition-all hover:opacity-90 active:scale-95 shadow-lg disabled:opacity-60 disabled:cursor-not-allowed`}
                 >
                   {loading ? (
@@ -275,6 +309,47 @@ export default function AuthPage({ onSuccess }: AuthPageProps) {
                 </button>
               </div>
             </form>
+
+            {/* ── Pera Wallet sign-in ── */}
+            <div className="mt-6">
+              <div className="flex items-center gap-3 mb-4">
+                <div className="h-px flex-1 bg-white/15" />
+                <span className="text-white/35 text-[10px] font-bold uppercase tracking-widest">
+                  or continue with a wallet
+                </span>
+                <div className="h-px flex-1 bg-white/15" />
+              </div>
+
+              <button
+                type="button"
+                onClick={handlePeraSignIn}
+                disabled={busy}
+                className="w-full flex items-center justify-center gap-2.5 bg-[#FFEE55] text-slate-900 py-3.5 rounded-xl font-bold text-sm transition-all hover:brightness-95 active:scale-95 shadow-lg disabled:opacity-60 disabled:cursor-not-allowed"
+              >
+                {walletConnecting ? (
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                ) : (
+                  <Wallet className="w-4 h-4" />
+                )}
+                {walletConnecting
+                  ? 'Waiting for Pera Wallet…'
+                  : walletAddress
+                    ? `Sign in as ${shortenAddress(walletAddress)}`
+                    : 'Connect Pera Wallet'}
+              </button>
+
+              <p className="text-white/35 text-[11px] mt-2.5 leading-relaxed text-center">
+                Signs a one-time message to prove you own the account.
+                <br />
+                No password, no gas fee, no transaction.
+                {walletAddress && (
+                  <>
+                    <br />
+                    <span className="font-mono text-white/50">{walletAddress}</span>
+                  </>
+                )}
+              </p>
+            </div>
 
             <div className="mt-6 pt-5 border-t border-white/10 text-center">
               <p className="text-white/40 text-xs">

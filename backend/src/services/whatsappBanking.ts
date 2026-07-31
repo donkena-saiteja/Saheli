@@ -140,8 +140,13 @@ async function loadSession(phone: string, profileName?: string) {
 
 async function resolveUserByPhone(phone: string) {
   const digits = normalizePhone(phone);
-  const candidates = await User.find({ role: 'member' }).select('name phone shgId mpinHash trustScore totalSavings activeLoans activeLoansAmount yieldEarned');
-  return candidates.find((u) => normalizePhone(u.phone) === digits) || null;
+  // An empty inbound number must never match a phone-less (wallet-only)
+  // account, so bail before touching the database.
+  if (!digits) return null;
+
+  const candidates = await User.find({ role: 'member', phone: { $exists: true, $ne: null } })
+    .select('name phone shgId mpinHash trustScore totalSavings activeLoans activeLoansAmount yieldEarned');
+  return candidates.find((u) => u.phone && normalizePhone(u.phone) === digits) || null;
 }
 
 async function verifyMpin(user: any, entered: string): Promise<boolean> {

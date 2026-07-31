@@ -109,6 +109,10 @@ export default function MemberDashboard({ activeSection = 'passport', onOpenAIAs
 
   const { data: rawMember, loading, error } = useApiFetch(() => membersApi.getById(memberId));
   const { data: repayments } = useApiFetch(() => agentApi.getRepayments());
+  const { data: memberTransactions, loading: transactionsLoading } = useApiFetch(
+    () => membersApi.getTransactions(memberId),
+    [memberId],
+  );
 
   // If it's a real MongoDB user newly registered, they might lack these fields from mockData
   const member = React.useMemo(() => {
@@ -123,10 +127,24 @@ export default function MemberDashboard({ activeSection = 'passport', onOpenAIAs
       activeLoans: rawMember.activeLoans ?? 0,
       activeLoansAmount: rawMember.activeLoansAmount ?? 0,
       yieldEarned: rawMember.yieldEarned ?? 0,
-      transactions: rawMember.transactions || [],
+      // The member document has no embedded transactions — they come from
+      // /api/members/:id/transactions. Normalised here so the activity feed
+      // and the audit trail read the same shape.
+      transactions: (memberTransactions || []).map((tx: any) => ({
+        id: String(tx._id),
+        type: tx.type,
+        amount: ['deposit', 'yield', 'loan_repayment'].includes(tx.type)
+          ? tx.amount
+          : -Math.abs(tx.amount),
+        description: tx.description,
+        transactionId: tx.transactionId,
+        status: tx.status,
+        agentProcessed: tx.agentProcessed,
+        timestamp: tx.createdAt,
+      })),
       badges: rawMember.badges || ['New Member'],
     };
-  }, [rawMember]);
+  }, [rawMember, memberTransactions]);
 
   useEffect(() => {
     setSettings((s) => ({ ...s, language }));
@@ -349,39 +367,91 @@ export default function MemberDashboard({ activeSection = 'passport', onOpenAIAs
   }
 
   if (activeSection === 'audit') {
-    const rows = (member?.transactions || []).filter((tx: any) => {
+    // Transactions live on their own endpoint — the member document never
+    // carried them, which is why this list used to render empty.
+    const rows = (memberTransactions || []).filter((tx: any) => {
       const q = auditQuery.trim().toLowerCase();
       if (!q) return true;
       return (
         String(tx.description || '').toLowerCase().includes(q) ||
-        String(tx.txHash || '').toLowerCase().includes(q) ||
+        String(tx.transactionId || '').toLowerCase().includes(q) ||
         String(tx.type || '').toLowerCase().includes(q)
       );
     });
 
     return (
       <div className="p-6 lg:p-10 max-w-5xl mx-auto space-y-6">
-        <div className="flex items-end justify-between gap-4">
+        <div className="flex flex-col lg:flex-row lg:items-end justify-between gap-4">
           <div>
             <p className="text-xs font-bold uppercase tracking-wider text-shg-primary mb-2">Immutable Audit Trail</p>
             <h2 className="text-2xl font-black font-headline text-on-surface">On-Chain Activity Logs</h2>
+            <p className="text-sm text-muted-foreground mt-1">
+              {rows.length} of {(memberTransactions || []).length} transactions · every row is anchored to Algorand
+            </p>
           </div>
           <input
             value={auditQuery}
             onChange={(e) => setAuditQuery(e.target.value)}
-            placeholder="Search by tx hash, type, or description"
+            placeholder="Search by tx id, type, or description"
             className="w-full max-w-sm border border-border rounded-xl px-3 py-2 text-sm"
           />
         </div>
-        <div className="bg-white border border-border/50 rounded-2xl divide-y divide-border/40">
-          {rows.length === 0 ? (
-            <p className="p-6 text-sm text-muted-foreground">No matching logs found.</p>
-          ) : rows.map((tx: any) => (
-            <div key={tx.id} className="p-4">
-              <p className="text-sm font-semibold text-on-surface">{tx.description}</p>
-              <p className="text-xs text-muted-foreground mt-1">{tx.type} · TX {String(tx.txHash || '').slice(0, 20)}...</p>
+
+        <div className="bg-white border border-border/50 rounded-2xl divide-y divide-border/40 overflow-hidden">
+          {transactionsLoading ? (
+            <div className="p-6 space-y-3">
+              <Skeleton className="h-5 w-2/3" />
+              <Skeleton className="h-5 w-1/2" />
+              <Skeleton className="h-5 w-3/5" />
             </div>
-          ))}
+          ) : rows.length === 0 ? (
+            <p className="p-6 text-sm text-muted-foreground">
+              {(memberTransactions || []).length === 0
+                ? 'No transactions yet. Make a deposit from the WhatsApp assistant to see one appear here.'
+                : 'No matching logs found.'}
+            </p>
+          ) : (
+            rows.map((tx: any) => {
+              const credit = ['deposit', 'yield', 'loan_repayment'].includes(tx.type);
+              return (
+                <div key={tx._id} className="p-4 flex flex-wrap items-center gap-x-4 gap-y-2">
+                  <div className="min-w-0 flex-1">
+                    <p className="text-sm font-semibold text-on-surface">{tx.description}</p>
+                    <p className="text-xs text-muted-foreground mt-1">
+                      {String(tx.type).replace(/_/g, ' ')} ·{' '}
+                      {new Date(tx.createdAt).toLocaleString('en-IN')}
+                    </p>
+                    {tx.transactionId && (
+                      <a
+                        href={`https://lora.algokit.io/testnet/transaction/${tx.transactionId}`}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="inline-block mt-1 text-[11px] font-mono text-shg-primary hover:underline break-all"
+                      >
+                        {tx.transactionId}
+                      </a>
+                    )}
+                  </div>
+                  <div className="text-right">
+                    <p className={`text-sm font-black ${credit ? 'text-emerald-600' : 'text-red-600'}`}>
+                      {credit ? '+' : '−'}₹{Math.abs(tx.amount).toLocaleString('en-IN')}
+                    </p>
+                    <span
+                      className={`inline-block mt-1 text-[10px] font-bold px-2 py-0.5 rounded-full ${
+                        tx.status === 'confirmed'
+                          ? 'bg-emerald-50 text-emerald-700'
+                          : tx.status === 'failed'
+                            ? 'bg-red-50 text-red-700'
+                            : 'bg-amber-50 text-amber-700'
+                      }`}
+                    >
+                      {tx.status}
+                    </span>
+                  </div>
+                </div>
+              );
+            })
+          )}
         </div>
       </div>
     );

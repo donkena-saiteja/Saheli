@@ -15,36 +15,46 @@ Tracks: *Blockchain with Algorand* · *Agentic AI × Blockchain*
 |---|---|---|
 | **x402 Pay-per-Use Payments** (mandatory) | ✅ Implemented — x402 v2, `exact` scheme on `algorand:SGO1GKSzyE7IEPItTxCByw9x8FmnrCDe` | [`backend/src/x402/`](backend/src/x402/) |
 | **AlgoKit** | ✅ 3 Algorand Python contracts, compiled to TEAL v11 | [`contracts/`](contracts/) |
-| **Fully functional during evaluation** | ✅ 22/22 automated checks — `npm run verify` | [`backend/src/scripts/verify.ts`](backend/src/scripts/verify.ts) |
+| **Pera Wallet sign-in** | ✅ Challenge/response, single-use nonce, ed25519 verified server-side | [`backend/src/services/walletAuth.ts`](backend/src/services/walletAuth.ts) · [`app/src/lib/pera.ts`](app/src/lib/pera.ts) |
+| **Fully functional during evaluation** | ✅ 29/29 automated checks — `npm run verify` | [`backend/src/scripts/verify.ts`](backend/src/scripts/verify.ts) |
 
 ```bash
 cd backend && npm run verify
 ```
 
 ```
-ALL 22 CHECKS PASSED
+ALL 29 CHECKS PASSED
 ```
 
 ---
 
-## Quick start (60 seconds, zero external dependencies)
+## Running the complete project
 
-No MongoDB installation required — the API starts an in-process database automatically if it can't reach one.
+Requires **Node 20+**. Nothing else — no MongoDB install, no Python, no Algorand node. The API starts an in-process database automatically if it can't reach one, and falls back to deterministic local settlement if the chain is unreachable.
+
+### Terminal 1 — backend (port 3001)
 
 ```bash
-git clone <repo> && cd Saheli
 cd backend && npm install && npm run dev
 ```
+
+### Terminal 2 — frontend (port 5173)
 
 ```bash
 cd app && npm install && npm run dev
 ```
 
-Then seed a full demo SHG:
+### Terminal 3 — seed the demo SHG, then prove it all works
 
 ```bash
 curl -X POST http://127.0.0.1:3001/api/auth/seed-demo -H "Content-Type: application/json" -d "{\"reset\":true}"
 ```
+
+```bash
+cd backend && npm run verify
+```
+
+Open <http://localhost:5173> and sign in.
 
 | Role | Phone | Password |
 |---|---|---|
@@ -52,9 +62,42 @@ curl -X POST http://127.0.0.1:3001/api/auth/seed-demo -H "Content-Type: applicat
 | Leader | `+91-9000000001` | `demo1234` |
 | Bank | `+91-9000000002` | `demo1234` |
 
-WhatsApp MPIN: **1234**
+WhatsApp MPIN: **1234** · Or skip passwords entirely and use **Connect Pera Wallet**.
 
-Health check — proves both mandatory capabilities in one request: <http://127.0.0.1:3001/health>
+Health check — proves every mandatory capability in one request: <http://127.0.0.1:3001/health>
+
+### Everything at once (Docker)
+
+```bash
+docker compose up --build
+```
+
+Frontend <http://localhost:8080> · Backend <http://localhost:3001> · MongoDB `:27017`
+
+### Optional — build and deploy the AlgoKit contracts
+
+```bash
+cd contracts && algokit project bootstrap all && algokit project run build
+```
+
+Compiled TEAL is already committed, so this is only needed to re-verify or deploy.
+
+---
+
+## Where to check things
+
+| What you want to see | Where |
+|---|---|
+| **All transactions** | Leader dashboard → **Audit Logs** → *On-Chain Transaction Ledger* (whole SHG, every txid clickable) |
+| One member's transactions | Member dashboard → **Audit Logs** (searchable, with status + explorer links) |
+| Transactions as raw JSON | `GET /api/transactions/ledger?limit=100` · `GET /api/transactions?memberId=<id>` |
+| A single transaction on chain | `GET /api/algorand/tx/:txId`, or open `https://lora.algokit.io/testnet/transaction/<txId>` |
+| Independent proof of a transaction | `GET /api/qr/verify/:transactionId` — checks Algorand first, our ledger second |
+| **x402 working, visually** | Any dashboard → **x402 Pay-per-Use** (see the next section) |
+| x402 revenue routed to SHGs | `GET /api/x402/revenue`, or the revenue panel in the x402 console |
+| Wallet/relayer/chain status | `GET /api/algorand/info` and `/health` |
+
+> **Note on `txId` vs `transactionId`.** Ledger list responses carry both: `txId` is truncated for narrow UI rows, `transactionId` is the full 52-character Algorand id. Always use `transactionId` for lookups — the truncated one resolves to nothing.
 
 ---
 
@@ -76,24 +119,58 @@ An SHG's most valuable asset is its repayment history — and today banks, MFIs 
 
 That last row is the agentic-commerce story: a bank's underwriting agent discovers the endpoint, receives a 402, pays autonomously, and consumes the answer — no invoice, no human, no account setup.
 
-### See it work
+### Proving x402 actually ran — five independent pieces of evidence
+
+**In the UI:** log in → **x402 Pay-per-Use** in the sidebar → click *1. Request without paying*, then *2. Pay and unlock*. The raw 402 body, all five protocol steps, and the unlocked resource render on screen.
+
+**On the command line**, each step leaves a trace you can check yourself:
 
 ```bash
-# 1. Unpaid -> HTTP 402 with spec-exact PaymentRequirements
+# EVIDENCE 1 — the gate is real. Unpaid requests get a spec-exact HTTP 402.
 curl -i http://127.0.0.1:3001/api/x402/credit-report/shg1
 ```
 
+Look for `HTTP/1.1 402 Payment Required`, the `Accept-Payment: exact algorand:SGO1…` header, and an `accepts[0]` carrying `scheme`, `network`, `asset`, `amount`, `payTo` and `extra.feePayer`.
+
 ```bash
-# 2. Full handshake: challenge -> atomic group -> verify -> settle
+# EVIDENCE 2 — the full handshake, one step at a time.
 curl -X POST http://127.0.0.1:3001/api/x402/demo/pay -H "Content-Type: application/json" -d "{\"resourceId\":\"credit-report\"}"
 ```
 
+Returns `steps[1..5]`: the challenge, the signed 2-transaction Algorand atomic group, the facilitator `verify` result (`isValid: true` plus the payer address), the `settle` result (transaction id + settlement mode), and the treasury credit. It also returns `paymentHeader` — the base64 `X-PAYMENT` value.
+
 ```bash
-# 3. Revenue routed back to the women
+# EVIDENCE 3 — replay that header against the genuinely gated endpoint.
+curl -i -H "X-PAYMENT: <paymentHeader from step 2>" http://127.0.0.1:3001/api/x402/credit-report/shg1
+```
+
+Now `HTTP/1.1 200 OK`. Two things prove payment was processed rather than skipped:
+- the **`X-PAYMENT-RESPONSE`** response header — base64 JSON with `success`, `payer`, `transaction`, `network`
+- the **`paidWith`** field in the body — resource id, payer, settlement mode and amount
+
+Decode the receipt:
+
+```bash
+node -e "console.log(JSON.parse(Buffer.from(process.argv[1],'base64').toString()))" <X-PAYMENT-RESPONSE value>
+```
+
+```bash
+# EVIDENCE 4 — every settled payment is persisted, with its revenue split.
 curl http://127.0.0.1:3001/api/x402/revenue
 ```
 
-Or open **x402 Pay-per-Use** in any dashboard for the same flow with every protocol step rendered.
+`totals.calls` increments on each paid request, and `treasuryDisplay` is the share routed back to the SHG. `recent[]` lists each payment with its `transactionId`, `settlement` mode and `explorerUrl`.
+
+```bash
+# EVIDENCE 5 — payment is genuinely enforced, not decorative.
+curl -i -H "X-PAYMENT: dGFtcGVyZWQ=" http://127.0.0.1:3001/api/x402/credit-report/shg1
+```
+
+A forged or malformed header returns 400/402 with a `verifyError.reason` — never the resource.
+
+**The automated suite** (`cd backend && npm run verify`) asserts all of this and prints a pass/fail table, so you can demonstrate it in one command in front of a judge.
+
+> **Settlement mode, stated honestly.** With an unfunded relayer, `settle` returns `settlement: "simulated"` and every response says so. The 402 gate, the payload structure, verification and the revenue split are all real regardless. Fund the relayer address from `/api/algorand/info` at the [TestNet dispenser](https://bank.testnet.algorand.network) and the same flow settles on chain with no config change.
 
 ### Implementation notes
 
@@ -162,7 +239,63 @@ The in-browser simulator calls `/api/whatsapp/simulate`, which invokes **the sam
 
 ---
 
-## 3. Algorand
+## 3. Pera Wallet sign-in
+
+Saheli derives custodial accounts for members who cannot safeguard a seed phrase — that is the right trade-off for a rural SHG member, and it is documented under *Known limits*. But SHG leaders, bank officers and NGO auditors **can** hold their own keys, and they should not have to trust us with a password either.
+
+So there are two ways in: phone + password, or **Connect Pera Wallet**.
+
+### How it works
+
+```
+Client                          Server                        Pera Wallet
+  │  POST /auth/wallet/challenge   │                                │
+  │  { address } ─────────────────>│                                │
+  │                                │  mint single-use nonce (5 min) │
+  │  <──── { nonce, message } ─────│                                │
+  │                                                                 │
+  │  signData("MX" || message) ────────────────────────────────────>│
+  │  <──────────────────────── ed25519 signature ───────────────────│
+  │                                │                                │
+  │  POST /auth/wallet/verify      │                                │
+  │  { address, nonce, sig } ─────>│  verify sig against the        │
+  │                                │  address' public key,          │
+  │                                │  burn the nonce                │
+  │  <──────── { user, JWT } ──────│                                │
+```
+
+- **No key, seed phrase or password ever reaches the server.** Only a signature over text the server itself issued.
+- **The nonce is single-use and expires in 5 minutes.** It is burned on the first verification attempt whatever the outcome, so a captured signature cannot be replayed.
+- **`"MX"` prefix.** Algorand's domain separator for signing arbitrary (non-transaction) bytes. Both sides prepend it, matching `PeraWalletConnect.verifySignature` exactly — so a signature can never be mistaken for a transaction authorisation.
+- **Costs nothing.** It is a signature, not a transaction: no fee, no chain write, no funds moved.
+
+### Endpoints
+
+| Endpoint | Purpose |
+|---|---|
+| `POST /api/auth/wallet/challenge` | Mint a nonce for an address. Also reports whether the wallet is already known. |
+| `POST /api/auth/wallet/verify` | Exchange a signature for a JWT. Creates the account on first sign-in. |
+| `POST /api/auth/wallet/link` | Attach a wallet to an account that is already signed in (password → self-custody upgrade). |
+
+First signature for an address creates the account with the role selected on the sign-in screen. Returning wallets keep the profile they already have. Existing password users can link a wallet from the **Connect Pera** button in the top bar without losing their history.
+
+### Verified behaviour
+
+`npm run verify` exercises the real endpoints with a throwaway keypair, signing exactly the way Pera does:
+
+```
+PASS  Wallet challenge issued with a single-use nonce
+PASS  Valid Pera signature issues a JWT session
+PASS  Replayed nonce is refused
+PASS  Signature from a different key is rejected
+PASS  Wallet session authenticates against a protected route
+```
+
+Set `VITE_ALGORAND_NETWORK` (frontend) to match `ALGORAND_NETWORK` (backend) — `testnet` by default. Pointing the wallet at a different chain than the API is the one way to misconfigure this.
+
+---
+
+## 4. Algorand
 
 Every transaction id in this project is a **real 52-character Algorand txid**, and every explorer link resolves.
 
@@ -183,7 +316,7 @@ curl http://127.0.0.1:3001/api/algorand/info
 
 ---
 
-## 4. AlgoKit smart contracts
+## 5. AlgoKit smart contracts
 
 Algorand Python (`algopy`), compiled with `puyapy` 5.9 to **TEAL v11**. Compiled artifacts are committed so they can be verified without a Python toolchain.
 
@@ -202,7 +335,7 @@ See [`contracts/README.md`](contracts/README.md) to build and deploy.
 
 ---
 
-## 5. Dynamic Soulbound Tokens (d-SBT)
+## 6. Dynamic Soulbound Tokens (d-SBT)
 
 A static credit score tells a bank one number it has to trust. A d-SBT tells it the whole story.
 
@@ -259,7 +392,9 @@ Saheli/
 3. **"Pay $0.25 and unlock"** — watch the five protocol steps, then the credit report with an actual lending decision.
 4. Scroll to **revenue** — that $0.20 went to the SHG treasury. *This is how the women get paid for their own data.*
 5. **Open the WhatsApp assistant** → send `Hi` → `1234` → tap the 🎙️ voice sample *"I need 5000 rupees urgently for hospital"* → `YES`. Emergency loan approved by the AI agent against the on-chain trust score, with a QR proof and a live explorer link.
-6. **`cd backend && npm run verify`** — 22/22, live, in front of them.
+6. **Sign out → "Connect Pera Wallet"** — scan with the Pera app, approve one signature, and you are in. No password was ever created; the server only ever saw a signature.
+7. **Audit Logs** — every transaction with its full 52-character Algorand txid, each one a live explorer link.
+8. **`cd backend && npm run verify`** — 29/29, live, in front of them.
 
 ---
 
@@ -279,8 +414,13 @@ cp backend/.env.example backend/.env
 | `TWILIO_*` | Browser simulator still works; live WhatsApp disabled |
 | `OPENAI_API_KEY` | Voice transcription disabled; text and menus unaffected |
 | `SARVAM_API_KEY` | Falls back to LibreTranslate, then passthrough |
+| `JWT_SECRET` | Falls back to a public default — **must be set in production** |
+| `WALLET_CHALLENGE_TTL_MS` | Pera sign-in challenges expire after 5 minutes |
+| `VITE_ALGORAND_NETWORK` (frontend) | Pera Wallet connects to TestNet |
 
 ## Deployment
+
+### Locally, everything at once
 
 ```bash
 docker compose up --build
@@ -288,14 +428,68 @@ docker compose up --build
 
 Frontend `:8080` · Backend `:3001` · MongoDB `:27017`
 
+### Free hosting that fits this stack
+
+The frontend is a static Vite bundle and the backend is a long-running Node process, so they want different hosts. Every option below has a genuinely free tier.
+
+| Piece | Recommended free host | Notes |
+|---|---|---|
+| **Frontend** (`app/`) | **Vercel** or **Netlify** or **Cloudflare Pages** | Build `npm run build`, publish `dist`. All three give unlimited static bandwidth on the free plan and a HTTPS domain. |
+| **Backend** (`backend/`) | **Render** free web service | Build `npm install && npm run build`, start `npm start`. Free instances sleep after ~15 min idle and take ~50 s to wake — **hit `/health` right before demoing**. |
+| Backend alternative | **Railway** ($5 monthly credit) or **Fly.io** | No cold starts on Fly's free allowance. Railway's credit covers a hackathon comfortably. |
+| **Database** | **MongoDB Atlas M0** | 512 MB, free forever. Paste the connection string into `MONGODB_URI`. Allow `0.0.0.0/0` in Network Access or the host cannot reach it. |
+| Everything in one box | **Render** (single service) | Build the frontend into the backend and set `FRONTEND_DIST_PATH` — the API already serves `dist/` and falls back to `index.html` for client routes. One URL, no CORS. |
+
+**Deploying frontend and backend separately** — set these before building:
+
+```bash
+# app/.env.production
+VITE_API_BASE_URL=https://your-api.onrender.com/api
+VITE_ALGORAND_NETWORK=testnet
+```
+
+```bash
+# backend environment
+CORS_ORIGINS=https://your-app.vercel.app
+MONGODB_URI=<your Atlas connection string>
+JWT_SECRET=<a long random string>
+NODE_ENV=production
+```
+
+`CORS_ORIGINS` and `JWT_SECRET` are the two that actually bite: without the first the browser blocks every call, and without the second you ship with a publicly known signing key.
+
+**Cheapest reliable setup for judging:** Vercel (frontend) + Render (backend) + Atlas M0 (database). Zero cost, HTTPS everywhere, and Twilio can reach the webhook without ngrok.
+
+### Pre-deployment checklist
+
+- [ ] `JWT_SECRET` set to something long and random
+- [ ] `CORS_ORIGINS` set to the deployed frontend origin
+- [ ] `MONGODB_URI` pointing at Atlas, with the host's IP allowed
+- [ ] `VITE_API_BASE_URL` baked in at build time (Vite inlines it — setting it at runtime does nothing)
+- [ ] `VITE_ALGORAND_NETWORK` matches the backend's `ALGORAND_NETWORK`
+- [ ] `PUBLIC_BASE_URL` set to the public HTTPS URL, so QR proofs carry scannable links
+- [ ] `npm run verify -- --url https://your-api.onrender.com` passes against the deployed API
+
 ## Scripts
+
+**Backend**
 
 | Command | Purpose |
 |---|---|
-| `npm run dev` | Start backend (auto-reload) |
-| `npm run verify` | 22-check end-to-end suite |
+| `npm run dev` | Start backend with auto-reload |
+| `npm run verify` | 29-check end-to-end suite (backend must be running) |
 | `npm run typecheck` | Strict TypeScript, zero errors |
 | `npm run build` | Compile to `dist/` |
+| `npm start` | Run the compiled build |
+
+**Frontend**
+
+| Command | Purpose |
+|---|---|
+| `npm run dev` | Vite dev server on `:5173`, proxying `/api` and `/health` to `:3001` |
+| `npm run build` | Typecheck and build to `dist/` |
+| `npm run preview` | Serve the production build locally |
+| `npm run lint` | ESLint |
 
 ---
 
@@ -303,10 +497,9 @@ Frontend `:8080` · Backend `:3001` · MongoDB `:27017`
 
 Stated plainly, because a judge will find them anyway:
 
-- **Custodial keys.** Member accounts are derived from a platform master seed. That's the correct trade-off for users who cannot safeguard a seed phrase, but it means the platform is trusted. Production belongs in an HSM/KMS with threshold signing.
+- **Custodial keys for members.** Member accounts are derived from a platform master seed. That's the correct trade-off for users who cannot safeguard a seed phrase, but it means the platform is trusted for those accounts. Leaders, banks and NGOs can sign in with Pera Wallet instead and hold their own keys. Production belongs in an HSM/KMS with threshold signing.
+- **Wallet challenges are held in memory.** Single-use and expiring in minutes, so persisting them buys nothing — but a multi-instance deployment behind a load balancer needs Redis here, or a challenge issued by one instance won't verify on another.
 - **Settlement mode.** Live on-chain settlement needs a funded relayer. Unfunded, the API says `simulated` — never anything stronger.
 - **Contracts compile but are not deployed.** TEAL is committed and verifiable; deploying needs a funded TestNet account (`algokit project deploy`). The backend anchors to chain regardless.
 - **DeFi yield is modelled.** Folks Finance / Tinyman APYs drive a simulation; live pool integration is the next step, not a claim we make.
 - **Demo MPIN is `1234`** for every seeded account.
-#   S a h e l i  
- 

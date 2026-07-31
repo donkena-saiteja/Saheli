@@ -32,6 +32,32 @@ export const authApi = {
   register: (body: { name: string; phone: string; password: string; role: string; shgId?: string }) =>
     apiFetch<any>('/auth/register', { method: 'POST', body: JSON.stringify(body) }),
   profile: () => apiFetch<any>('/auth/profile'),
+
+  // ── Pera Wallet sign-in ──
+  /** Step 1: ask the server for a single-use challenge to sign. */
+  walletChallenge: (address: string) =>
+    apiFetch<{
+      address: string;
+      nonce: string;
+      message: string;
+      expiresAt: string;
+      network: string;
+      knownAccount: { name: string; role: string; shgId?: string } | null;
+    }>('/auth/wallet/challenge', { method: 'POST', body: JSON.stringify({ address }) }),
+
+  /** Step 2: hand back the signature and receive a JWT session. */
+  walletVerify: (body: {
+    address: string;
+    nonce: string;
+    signature: string;
+    name?: string;
+    role?: string;
+    shgId?: string;
+  }) => apiFetch<any>('/auth/wallet/verify', { method: 'POST', body: JSON.stringify(body) }),
+
+  /** Attaches a Pera wallet to the account that is already signed in. */
+  walletLink: (body: { address: string; nonce: string; signature: string }) =>
+    apiFetch<any>('/auth/wallet/link', { method: 'POST', body: JSON.stringify(body) }),
 };
 
 // ─── Members ──────────────────────────────────────────────────────────────────
@@ -138,8 +164,11 @@ const X402_PATHS: Record<string, { path: string; method: 'GET' | 'POST'; body?: 
 
 /** Resolves placeholders that need a live member id. */
 async function resolveX402Target(resourceId: string) {
-  const spec = { ...X402_PATHS[resourceId] };
-  if (!spec) throw new Error(`Unknown x402 resource: ${resourceId}`);
+  const template = X402_PATHS[resourceId];
+  // Spreading an undefined entry yields a truthy `{}`, so the guard has to run
+  // against the lookup itself, not against the copy.
+  if (!template) throw new Error(`Unknown x402 resource: ${resourceId}`);
+  const spec = { ...template };
 
   const needsMember =
     spec.path.includes(':memberId') || JSON.stringify(spec.body || {}).includes(':memberId');
@@ -156,8 +185,13 @@ async function resolveX402Target(resourceId: string) {
 
   if (resourceId === 'verify-proof') {
     const txs = await transactionsApi.getAll();
-    const txId = txs?.[0]?.txId?.replace(/\.\.\.$/, '');
-    spec.body = { transactionId: txId || 'UNKNOWN' };
+    // `txId` is a truncated display string; only `transactionId` resolves
+    // against the ledger or the chain.
+    const txId = txs?.find((t: any) => t?.transactionId)?.transactionId;
+    if (!txId) {
+      throw new Error('No anchored transaction to verify yet. Seed the demo data first.');
+    }
+    spec.body = { transactionId: txId };
   }
 
   return spec;
