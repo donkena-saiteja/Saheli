@@ -8,13 +8,29 @@ import {
   Activity,
   LifeBuoy,
   Save,
+  FileSpreadsheet,
+  Loader2,
+  ExternalLink,
+  ShieldCheck,
+  HandCoins,
+  Clock,
+  Banknote,
 } from 'lucide-react';
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { gsap } from 'gsap';
 import { useApiFetch, useApiMutation, useApiPolling } from '../hooks/useApi';
-import { qrApi, statsApi } from '../lib/api';
+import {
+  qrApi,
+  statsApi,
+  transactionsApi,
+  loansApi,
+  multisigApi,
+  reportsApi,
+  aiMonitorApi,
+} from '../lib/api';
 import { toast } from 'sonner';
 import { useLanguage } from '../contexts/LanguageContext';
+import AIAgentPanel from '../components/AIAgentPanel';
 
 const Skeleton = ({ className = '' }: { className?: string }) => (
   <div className={`bg-surface animate-pulse rounded-lg ${className}`} />
@@ -94,8 +110,63 @@ export default function BankDashboard({ activeSection = 'scanner' }: BankDashboa
   const { data: stats, loading: loadingStats, refetch: refetchStats } = useApiFetch(() => statsApi.getInstitutional());
   const { data: shgDirectory, loading: loadingDirectory } = useApiFetch(() => statsApi.getSHGDirectory());
   const { data: ledger } = useApiPolling(() => statsApi.getLedger(), 6000);
+
+  // Audit view: the full anchored ledger, plus everything awaiting a decision.
+  const { data: fullLedger, loading: loadingFullLedger, refetch: refetchFullLedger } = useApiPolling(
+    () => transactionsApi.getLedger(),
+    10000,
+  );
+  const { data: bankQueue, refetch: refetchBankQueue } = useApiPolling(() => loansApi.getBankQueue(), 8000);
+  const { data: pendingApprovals } = useApiPolling(() => multisigApi.getPending(), 8000);
+  const { data: complianceAlerts } = useApiPolling(() => aiMonitorApi.getAlerts('open'), 12000);
+
   const { mutate: verifyTx, loading: verifyingTx } = useApiMutation((txHash: string) => qrApi.verify(txHash));
   const { mutate: approveGrant, loading: approvingGrant } = useApiMutation((_input: null) => statsApi.approveGrant());
+  const { mutate: processDisbursement } = useApiMutation((id: string) =>
+    loansApi.processBankQueue(id, 'BANK_OFFICER'),
+  );
+
+  const [ledgerQuery, setLedgerQuery] = useState('');
+  const [ledgerType, setLedgerType] = useState<'all' | 'credit' | 'debit'>('all');
+  const [exporting, setExporting] = useState<string | null>(null);
+  const [busyQueueId, setBusyQueueId] = useState<string | null>(null);
+
+  const handleExport = useCallback(async (report: string, format: 'xlsx' | 'csv' = 'xlsx') => {
+    setExporting(`${report}.${format}`);
+    try {
+      const result = await reportsApi.download(report, format);
+      toast.success(`Downloaded ${result.filename} (${Math.round(result.bytes / 1024)} KB)`);
+    } catch (err) {
+      toast.error((err as Error).message || 'Export failed');
+    }
+    setExporting(null);
+  }, []);
+
+  const filteredLedger = useMemo(() => {
+    const q = ledgerQuery.trim().toLowerCase();
+    return (fullLedger || []).filter((tx: any) => {
+      if (ledgerType !== 'all' && tx.type !== ledgerType) return false;
+      if (!q) return true;
+      return (
+        String(tx.event || '').toLowerCase().includes(q) ||
+        String(tx.memberName || '').toLowerCase().includes(q) ||
+        String(tx.transactionId || '').toLowerCase().includes(q) ||
+        String(tx.txType || '').toLowerCase().includes(q)
+      );
+    });
+  }, [fullLedger, ledgerQuery, ledgerType]);
+
+  const handleProcessDisbursement = async (id: string, memberName: string) => {
+    setBusyQueueId(id);
+    try {
+      await processDisbursement(id);
+      toast.success(`Payout released to ${memberName}.`);
+      await Promise.all([refetchBankQueue(), refetchFullLedger(), refetchStats()]);
+    } catch (err) {
+      toast.error((err as Error).message || 'Could not release the payout');
+    }
+    setBusyQueueId(null);
+  };
 
   useEffect(() => {
     setSettings((s) => ({ ...s, preferredLanguage: language }));
@@ -182,6 +253,411 @@ export default function BankDashboard({ activeSection = 'scanner' }: BankDashboa
     URL.revokeObjectURL(url);
     toast.success('Regional SHG directory exported');
   };
+
+  // ── Audit Directory ──────────────────────────────────────────────────────
+  // This sidebar entry used to fall through to the scanner view and render
+  // nothing recognisable. It is now the institutional audit surface: the full
+  // anchored ledger, the approval queue, compliance findings, and Excel export.
+  if (activeSection === 'audit') {
+    const credits = filteredLedger.filter((t: any) => t.type === 'credit');
+    const debits = filteredLedger.filter((t: any) => t.type === 'debit');
+    const creditTotal = credits.reduce((s: number, t: any) => s + Math.abs(t.amount), 0);
+    const debitTotal = debits.reduce((s: number, t: any) => s + Math.abs(t.amount), 0);
+
+    return (
+      <div className="p-6 lg:p-10 max-w-7xl mx-auto space-y-6">
+        <div className="flex flex-col lg:flex-row lg:items-end justify-between gap-4">
+          <div>
+            <p className="text-xs font-bold uppercase tracking-wider text-shg-primary mb-2">Institutional Oversight</p>
+            <h2 className="text-2xl font-black font-headline text-on-surface">Audit Directory</h2>
+            <p className="text-sm text-muted-foreground mt-1">
+              Every anchored movement, every pending approval, every compliance finding — in one place.
+            </p>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            <button
+              onClick={() => handleExport('full-ledger', 'xlsx')}
+              disabled={exporting !== null}
+              className="px-4 py-2.5 bg-shg-primary text-white rounded-xl font-bold text-sm inline-flex items-center gap-2 disabled:opacity-60"
+            >
+              {exporting === 'full-ledger.xlsx' ? (
+                <Loader2 className="w-4 h-4 animate-spin" />
+              ) : (
+                <FileSpreadsheet className="w-4 h-4" />
+              )}
+              Full Pack (.xlsx)
+            </button>
+            <button
+              onClick={() => handleExport('transactions', 'xlsx')}
+              disabled={exporting !== null}
+              className="px-4 py-2.5 bg-white border border-border rounded-xl font-bold text-sm inline-flex items-center gap-2 hover:bg-surface disabled:opacity-60"
+            >
+              {exporting === 'transactions.xlsx' ? (
+                <Loader2 className="w-4 h-4 animate-spin" />
+              ) : (
+                <Download className="w-4 h-4" />
+              )}
+              Transactions (.xlsx)
+            </button>
+            <button
+              onClick={() => handleExport('transactions', 'csv')}
+              disabled={exporting !== null}
+              className="px-4 py-2.5 bg-white border border-border rounded-xl font-bold text-sm inline-flex items-center gap-2 hover:bg-surface disabled:opacity-60"
+            >
+              CSV
+            </button>
+          </div>
+        </div>
+
+        {/* Totals */}
+        <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+          {[
+            ['Entries', String(filteredLedger.length), 'text-on-surface'],
+            ['Credits', `₹${creditTotal.toLocaleString('en-IN')}`, 'text-emerald-600'],
+            ['Debits', `₹${debitTotal.toLocaleString('en-IN')}`, 'text-red-600'],
+            ['Net position', `₹${(creditTotal - debitTotal).toLocaleString('en-IN')}`, 'text-shg-primary'],
+          ].map(([label, value, tone]) => (
+            <div key={label} className="bg-white border border-border/50 rounded-xl p-4">
+              <p className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground">{label}</p>
+              <p className={`text-xl font-black font-headline mt-1 ${tone}`}>{value}</p>
+            </div>
+          ))}
+        </div>
+
+        {/* Approvals awaiting a decision */}
+        <div className="bg-white border border-border/50 rounded-2xl overflow-hidden">
+          <div className="px-6 py-4 border-b border-border/50 flex items-center justify-between gap-3">
+            <h3 className="font-bold flex items-center gap-2">
+              <Clock className="w-4 h-4 text-shg-tertiary" />
+              Approvals in flight
+            </h3>
+            <span className="text-xs font-bold text-muted-foreground">
+              {(pendingApprovals || []).length} awaiting leader sign-off
+            </span>
+          </div>
+          {(pendingApprovals || []).length === 0 ? (
+            <p className="p-6 text-sm text-muted-foreground">
+              Nothing pending. Every request has been approved or declined.
+            </p>
+          ) : (
+            <div className="divide-y divide-border/40">
+              {(pendingApprovals || []).map((action: any) => (
+                <div key={action.id} className="px-6 py-3 flex flex-wrap items-center gap-4">
+                  <div className="min-w-0 flex-1">
+                    <p className="text-sm font-semibold text-on-surface">{action.description}</p>
+                    <p className="text-xs text-muted-foreground mt-0.5">
+                      Requested by {action.requestedBy} · {action.signatures.length}/{action.signaturesRequired}{' '}
+                      leader approval
+                      {action.isEmergency ? ' · emergency' : ''}
+                    </p>
+                  </div>
+                  <p className="text-sm font-black text-shg-primary">
+                    ₹{Number(action.amount || 0).toLocaleString('en-IN')}
+                  </p>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+
+        {/* Bank payout queue — the bank's own action, not the leader's */}
+        <div className="bg-white border border-border/50 rounded-2xl overflow-hidden">
+          <div className="px-6 py-4 border-b border-border/50 flex items-center justify-between gap-3">
+            <h3 className="font-bold flex items-center gap-2">
+              <Banknote className="w-4 h-4 text-shg-primary" />
+              Payout queue
+            </h3>
+            <span className="text-xs font-bold text-muted-foreground">
+              {(bankQueue || []).length} ready to release
+            </span>
+          </div>
+          {(bankQueue || []).length === 0 ? (
+            <p className="p-6 text-sm text-muted-foreground">
+              No payouts waiting. Approved loans land here for the bank to release.
+            </p>
+          ) : (
+            <div className="divide-y divide-border/40">
+              {(bankQueue || []).map((item: any) => (
+                <div key={item._id} className="px-6 py-4 flex flex-wrap items-center gap-4">
+                  <div className="min-w-0 flex-1">
+                    <p className="text-sm font-semibold text-on-surface">
+                      {item.user?.name || 'Member'} · ₹{Number(item.amount || 0).toLocaleString('en-IN')}
+                    </p>
+                    <p className="text-xs text-muted-foreground mt-0.5">
+                      {item.loan?.purpose || 'Loan payout'} · queued{' '}
+                      {item.queuedAt ? timeAgo(item.queuedAt) : 'recently'}
+                    </p>
+                  </div>
+                  <button
+                    onClick={() => handleProcessDisbursement(String(item._id), item.user?.name || 'the member')}
+                    disabled={busyQueueId === String(item._id)}
+                    className="px-4 py-2 bg-shg-secondary text-white rounded-lg text-xs font-bold inline-flex items-center gap-2 disabled:opacity-60"
+                  >
+                    {busyQueueId === String(item._id) ? (
+                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    ) : (
+                      <CheckCircle2 className="w-3.5 h-3.5" />
+                    )}
+                    Release Payout
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+
+        {/* Compliance findings from the AI agent */}
+        <div className="bg-white border border-border/50 rounded-2xl overflow-hidden">
+          <div className="px-6 py-4 border-b border-border/50 flex items-center justify-between gap-3">
+            <h3 className="font-bold flex items-center gap-2">
+              <ShieldCheck className="w-4 h-4 text-red-500" />
+              AI compliance findings
+            </h3>
+            <span className="text-xs font-bold text-muted-foreground">
+              {(complianceAlerts || []).length} open
+            </span>
+          </div>
+          {(complianceAlerts || []).length === 0 ? (
+            <p className="p-6 text-sm text-muted-foreground">
+              The agent has no outstanding findings against this portfolio.
+            </p>
+          ) : (
+            <div className="divide-y divide-border/40">
+              {(complianceAlerts || []).slice(0, 6).map((alert: any) => (
+                <div key={alert.id} className="px-6 py-4">
+                  <div className="flex flex-wrap items-center gap-2 mb-1">
+                    <span
+                      className={`px-2 py-0.5 rounded-full text-[10px] font-black uppercase ${
+                        alert.severity === 'critical'
+                          ? 'bg-red-50 text-red-700'
+                          : alert.severity === 'high'
+                            ? 'bg-orange-50 text-orange-700'
+                            : 'bg-amber-50 text-amber-700'
+                      }`}
+                    >
+                      {alert.severity}
+                    </span>
+                    <p className="text-sm font-semibold text-on-surface">{alert.title}</p>
+                  </div>
+                  <p className="text-xs text-muted-foreground">{alert.summary}</p>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+
+        {/* The ledger itself */}
+        <div className="bg-white border border-border/50 rounded-2xl overflow-hidden">
+          <div className="px-6 py-4 border-b border-border/50 flex flex-col lg:flex-row lg:items-center justify-between gap-3">
+            <div>
+              <h3 className="font-bold">On-Chain Transaction Ledger</h3>
+              <p className="text-xs text-muted-foreground mt-0.5">
+                Showing {filteredLedger.length} of {(fullLedger || []).length} anchored movements
+              </p>
+            </div>
+            <div className="flex flex-wrap items-center gap-2">
+              <div className="flex items-center bg-surface rounded-lg px-2">
+                <Search className="w-4 h-4 text-muted-foreground" />
+                <input
+                  value={ledgerQuery}
+                  onChange={(e) => setLedgerQuery(e.target.value)}
+                  placeholder="Member, type, or txid"
+                  className="bg-transparent px-2 py-1.5 text-sm focus:outline-none w-52"
+                />
+              </div>
+              <div className="flex bg-surface rounded-lg p-0.5">
+                {(['all', 'credit', 'debit'] as const).map((t) => (
+                  <button
+                    key={t}
+                    onClick={() => setLedgerType(t)}
+                    className={`px-3 py-1.5 rounded-md text-xs font-bold capitalize transition-colors ${
+                      ledgerType === t ? 'bg-white text-shg-primary shadow-sm' : 'text-muted-foreground'
+                    }`}
+                  >
+                    {t}
+                  </button>
+                ))}
+              </div>
+            </div>
+          </div>
+
+          <div className="max-h-[32rem] overflow-y-auto divide-y divide-border/40">
+            {loadingFullLedger && (fullLedger || []).length === 0 ? (
+              <div className="p-6 space-y-3">
+                <Skeleton className="h-5 w-2/3" />
+                <Skeleton className="h-5 w-1/2" />
+                <Skeleton className="h-5 w-3/5" />
+              </div>
+            ) : filteredLedger.length === 0 ? (
+              <p className="p-6 text-sm text-muted-foreground">
+                {(fullLedger || []).length === 0
+                  ? 'No transactions recorded yet. Seed the demo data or make a deposit.'
+                  : 'No entries match this filter.'}
+              </p>
+            ) : (
+              filteredLedger.map((tx: any) => (
+                <div key={tx.id} className="px-6 py-3 flex flex-wrap items-center gap-x-4 gap-y-1">
+                  <div className="min-w-0 flex-1">
+                    <p className="text-sm font-semibold text-on-surface capitalize">
+                      {String(tx.event || '').replace(/_/g, ' ')}
+                    </p>
+                    {tx.transactionId ? (
+                      <span className="flex flex-wrap items-center gap-1.5">
+                        <a
+                          href={tx.explorerUrl || `https://lora.algokit.io/testnet/transaction/${tx.transactionId}`}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="inline-flex items-center gap-1 text-[11px] font-mono text-shg-primary hover:underline break-all"
+                        >
+                          {tx.transactionId}
+                          <ExternalLink className="w-3 h-3 flex-shrink-0" />
+                        </a>
+                        {/* Never let a locally anchored id look like a live one. */}
+                        <span
+                          className={`text-[9px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded ${
+                            tx.onChain ? 'bg-emerald-50 text-emerald-700' : 'bg-slate-100 text-slate-500'
+                          }`}
+                          title={
+                            tx.onChain
+                              ? 'Broadcast and confirmed on Algorand — this link resolves.'
+                              : 'Anchored locally while the relayer was unfunded. This id does not exist on chain.'
+                          }
+                        >
+                          {tx.onChain ? 'on-chain' : 'local'}
+                        </span>
+                      </span>
+                    ) : (
+                      <span className="text-[11px] font-mono text-muted-foreground">{tx.txId}</span>
+                    )}
+                  </div>
+                  <div className="text-right">
+                    <p
+                      className={`text-sm font-black ${
+                        tx.type === 'credit' ? 'text-emerald-600' : 'text-red-600'
+                      }`}
+                    >
+                      {tx.type === 'credit' ? '+' : '−'}₹{Math.abs(tx.amount).toLocaleString('en-IN')}
+                    </p>
+                    <p className="text-[10px] text-muted-foreground">
+                      {new Date(tx.timestamp).toLocaleString('en-IN')}
+                    </p>
+                  </div>
+                  <span
+                    className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${
+                      tx.status === 'confirmed'
+                        ? 'bg-emerald-50 text-emerald-700'
+                        : tx.status === 'failed'
+                          ? 'bg-red-50 text-red-700'
+                          : 'bg-amber-50 text-amber-700'
+                    }`}
+                  >
+                    {tx.status}
+                  </span>
+                </div>
+              ))
+            )}
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // ── Grant Approval ───────────────────────────────────────────────────────
+  if (activeSection === 'grants') {
+    return (
+      <div className="p-6 lg:p-10 max-w-6xl mx-auto space-y-6">
+        <div>
+          <p className="text-xs font-bold uppercase tracking-wider text-shg-primary mb-2">Institutional Capital</p>
+          <h2 className="text-2xl font-black font-headline text-on-surface">Grant Approval</h2>
+          <p className="text-sm text-muted-foreground mt-1">
+            Release grant capital into the SHG treasury and clear approved loan payouts.
+          </p>
+        </div>
+
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+          <div className="bg-white border border-border/50 rounded-2xl p-5">
+            <p className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground">Active grants</p>
+            <p className="text-2xl font-black font-headline mt-1">{loadingStats ? '…' : stats?.activeGrants ?? 0}</p>
+          </div>
+          <div className="bg-white border border-border/50 rounded-2xl p-5">
+            <p className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground">Regional liquidity</p>
+            <p className="text-2xl font-black font-headline mt-1">
+              ₹{Number(stats?.regionalLiquidity || 0).toLocaleString('en-IN')}
+            </p>
+          </div>
+          <div className="bg-white border border-border/50 rounded-2xl p-5">
+            <p className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground">Payouts queued</p>
+            <p className="text-2xl font-black font-headline mt-1">{(bankQueue || []).length}</p>
+          </div>
+        </div>
+
+        <div className="bg-gradient-to-br from-shg-primary to-blue-700 text-white rounded-2xl p-6">
+          <div className="flex flex-wrap items-center justify-between gap-4">
+            <div>
+              <h3 className="font-bold text-lg font-headline flex items-center gap-2">
+                <HandCoins className="w-5 h-5" />
+                One-click grant release
+              </h3>
+              <p className="text-sm text-white/80 mt-1 max-w-lg">
+                Disburses ₹75,000 of institutional grant capital into the SHG treasury and anchors the movement on
+                Algorand.
+              </p>
+            </div>
+            <button
+              onClick={handleApproveGrant}
+              disabled={approvingGrant}
+              className="px-6 py-3 bg-white text-shg-primary rounded-xl font-bold text-sm inline-flex items-center gap-2 hover:opacity-90 disabled:opacity-60"
+            >
+              {approvingGrant ? <Loader2 className="w-4 h-4 animate-spin" /> : <CheckCircle2 className="w-4 h-4" />}
+              {approvingGrant ? 'Approving…' : 'Approve Grant'}
+            </button>
+          </div>
+        </div>
+
+        <div className="bg-white border border-border/50 rounded-2xl overflow-hidden">
+          <div className="px-6 py-4 border-b border-border/50 flex items-center justify-between gap-3">
+            <h3 className="font-bold">Loan payouts awaiting release</h3>
+            <span className="text-xs font-bold text-muted-foreground">{(bankQueue || []).length} queued</span>
+          </div>
+          {(bankQueue || []).length === 0 ? (
+            <p className="p-6 text-sm text-muted-foreground">
+              Nothing queued. Loans appear here once an SHG leader approves them.
+            </p>
+          ) : (
+            <div className="divide-y divide-border/40">
+              {(bankQueue || []).map((item: any) => (
+                <div key={item._id} className="px-6 py-4 flex flex-wrap items-center gap-4">
+                  <div className="min-w-0 flex-1">
+                    <p className="text-sm font-semibold text-on-surface">
+                      {item.user?.name || 'Member'} · ₹{Number(item.amount || 0).toLocaleString('en-IN')}
+                    </p>
+                    <p className="text-xs text-muted-foreground mt-0.5">{item.notes || 'Approved by SHG leader'}</p>
+                  </div>
+                  <button
+                    onClick={() => handleProcessDisbursement(String(item._id), item.user?.name || 'the member')}
+                    disabled={busyQueueId === String(item._id)}
+                    className="px-4 py-2 bg-shg-secondary text-white rounded-lg text-xs font-bold inline-flex items-center gap-2 disabled:opacity-60"
+                  >
+                    {busyQueueId === String(item._id) ? (
+                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    ) : (
+                      <CheckCircle2 className="w-3.5 h-3.5" />
+                    )}
+                    Release
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+
+        <div>
+          <h3 className="font-bold font-headline text-lg mb-3">Agent oversight</h3>
+          <AIAgentPanel canReview showSimulator />
+        </div>
+      </div>
+    );
+  }
 
   if (activeSection === 'settings') {
     return (

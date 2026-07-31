@@ -221,6 +221,92 @@ export async function initializeAgentState(): Promise<void> {
   await persistAgentState();
 }
 
+/**
+ * Rebuilds the agent's position so it is consistent with the actual ledger.
+ *
+ * The demo state used to hard-code ₹9,00,000 of vault deployments against a
+ * ledger holding a fraction of that, so `recalculateIdleFunds` — which is
+ * `treasury − vaultAUM` — clamped idle funds to zero and the treasury advisor
+ * had nothing to recommend. Deriving the split from the real net position keeps
+ * the vault panel, the idle-fund figure and the investment advice describing
+ * the same money.
+ *
+ * @param deployedShare Fraction of the net treasury modelled as already
+ *                      deployed to yield. The remainder is what the agent
+ *                      reports as idle and offers to invest.
+ */
+export async function resetAgentStateFromLedger(deployedShare = 0.35): Promise<AgentState> {
+  const inflowTypes = ['deposit', 'yield', 'loan_repayment'];
+  const outflowTypes = ['withdrawal', 'loan_disbursement'];
+
+  const [inflows, outflows] = await Promise.all([
+    Transaction.aggregate([
+      { $match: { type: { $in: inflowTypes }, status: { $ne: 'failed' } } },
+      { $group: { _id: null, total: { $sum: '$amount' } } },
+    ]),
+    Transaction.aggregate([
+      { $match: { type: { $in: outflowTypes }, status: { $ne: 'failed' } } },
+      { $group: { _id: null, total: { $sum: '$amount' } } },
+    ]),
+  ]);
+
+  const netTreasury = Math.max(0, (inflows[0]?.total || 0) - (outflows[0]?.total || 0));
+  const totalDeployed = Math.floor((netTreasury * deployedShare) / 100) * 100;
+
+  // Spread the deployed share across three real Algorand DeFi venues.
+  const weights = [0.45, 0.3, 0.25];
+  const pools = [ALGORAND_DEFI_POOLS[0], ALGORAND_DEFI_POOLS[2], ALGORAND_DEFI_POOLS[3]];
+
+  const vaultPositions: VaultPosition[] = pools.map((pool, index) => {
+    const deployed =
+      index === pools.length - 1
+        ? totalDeployed - weights.slice(0, -1).reduce((s, w) => s + Math.floor((totalDeployed * w) / 100) * 100, 0)
+        : Math.floor((totalDeployed * weights[index]) / 100) * 100;
+    const stakedAt = new Date(Date.now() - (index + 1) * 5 * 24 * 3600_000).toISOString();
+    const hoursStaked = (Date.now() - new Date(stakedAt).getTime()) / 3600000;
+
+    return {
+      id: `vault${index + 1}`,
+      protocol: pool.protocol,
+      asset: pool.asset,
+      deployed: Math.max(0, deployed),
+      apy: pool.apy,
+      yieldAccrued: Math.floor((Math.max(0, deployed) * pool.apy) / 100 / 8760 * hoursStaked),
+      stakedAt,
+      transactionId: simulatedTxId(`agent-vault-${index}-${netTreasury}`),
+      status: 'active',
+    };
+  });
+
+  const vaultAum = vaultPositions.reduce((s, v) => s + v.deployed, 0);
+
+  agentState = {
+    ...agentState,
+    idleFunds: Math.max(0, netTreasury - vaultAum),
+    totalDeployed: vaultAum,
+    totalYieldHarvested: agentState.totalYieldHarvested,
+    lastScanAt: new Date().toISOString(),
+    vaultPositions,
+    agentLog: [
+      {
+        id: uuidv4(),
+        tag: 'SYSTEM',
+        message: `Position rebuilt from ledger — ₹${netTreasury.toLocaleString('en-IN')} net treasury`,
+        detail: `₹${vaultAum.toLocaleString('en-IN')} deployed across ${vaultPositions.length} pools · ₹${Math.max(
+          0,
+          netTreasury - vaultAum,
+        ).toLocaleString('en-IN')} idle and available to invest.`,
+        amount: netTreasury,
+        timestamp: new Date().toISOString(),
+      },
+      ...agentState.agentLog.slice(0, 8),
+    ],
+  };
+
+  await persistAgentState();
+  return agentState;
+}
+
 export async function recalculateIdleFunds(): Promise<number> {
   const inflowTypes = ['deposit', 'yield', 'loan_repayment'];
   const outflowTypes = ['withdrawal', 'loan_disbursement'];

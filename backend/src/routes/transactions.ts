@@ -8,6 +8,7 @@ import { anchorLedgerEntry, explorerTxUrl } from '../services/algorand';
 import Transaction from '../models/Transaction';
 import User from '../models/User';
 import { recalculateIdleFunds } from '../services/agentEngine';
+import { screenTransaction } from '../services/aiMonitor';
 
 const router = Router();
 
@@ -25,6 +26,9 @@ function mapTxForLedger(tx: any) {
      */
     transactionId: tx.transactionId || null,
     explorerUrl: tx.transactionId ? explorerTxUrl(tx.transactionId) : null,
+    /** 'live' means the explorer link resolves; 'simulated' means it does not. */
+    settlementMode: tx.settlementMode || 'simulated',
+    onChain: tx.settlementMode === 'live',
     status: tx.status,
     txType: tx.type,
     amount: isCredit ? tx.amount : -Math.abs(tx.amount),
@@ -83,6 +87,15 @@ router.post('/', async (req: Request, res: Response) => {
     return;
   }
 
+  // The compliance agent screens the movement *before* it is written, so a
+  // structuring or velocity pattern is caught at the moment it happens rather
+  // than in the next periodic sweep.
+  const compliance = await screenTransaction({
+    userId: String(user._id),
+    type: String(type),
+    amount: Number(amount),
+  });
+
   // Anchor the movement on Algorand first; its txid becomes our reference.
   const anchor = await anchorLedgerEntry({
     kind: type,
@@ -108,6 +121,7 @@ router.post('/', async (req: Request, res: Response) => {
     description: description || `${type} via WhatsApp`,
     transactionId,
     status: anchor.mode === 'live' ? 'confirmed' : 'pending',
+    settlementMode: anchor.mode,
     agentProcessed: true,
   });
 
@@ -142,8 +156,14 @@ router.post('/', async (req: Request, res: Response) => {
       transactionId,
       explorerUrl: anchor.explorerUrl,
       chainMode: anchor.mode,
-      message:
-        anchor.mode === 'live'
+      compliance,
+      balances: {
+        memberSavings: user.totalSavings || 0,
+        memberOutstanding: user.activeLoansAmount || 0,
+      },
+      message: compliance.flagged
+        ? `⚠️ Recorded, but the compliance agent flagged it: ${compliance.reason}`
+        : anchor.mode === 'live'
           ? '✅ Settled on Algorand.'
           : '⏳ Transaction submitted. Confirmation pending.',
     },

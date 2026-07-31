@@ -8,16 +8,18 @@
  */
 
 import bcrypt from 'bcryptjs';
-import { v4 as uuidv4 } from 'uuid';
 import User from '../models/User';
 import Transaction from '../models/Transaction';
 import LoanModel from '../models/Loan';
 import MultiSigActionModel from '../models/MultiSigAction';
+import FraudAlert from '../models/FraudAlert';
 import DSBT from '../models/DSBT';
 import X402Payment from '../models/X402Payment';
 import WhatsAppSession from '../models/WhatsAppSession';
+import { resetAgentStateFromLedger } from './agentEngine';
 import { anchorLedgerEntry, deriveAccount, simulatedTxId } from './algorand';
 import { getOrMintPassport } from './dsbt';
+import { LEADER_APPROVALS_REQUIRED, openLoanApproval } from './loanWorkflow';
 import { DEFAULT_DEMO_MPIN } from './whatsappBanking';
 
 const SHG_ID = 'shg1';
@@ -69,6 +71,9 @@ export async function seedDemoData(reset = false): Promise<SeedResult> {
       Transaction.deleteMany({}),
       LoanModel.deleteMany({}),
       MultiSigActionModel.deleteMany({}),
+      // Cleared too, so a re-seeded demo starts from a clean compliance slate
+      // and the agent re-derives its findings from the fresh ledger.
+      FraudAlert.deleteMany({}),
       DSBT.deleteMany({}),
       X402Payment.deleteMany({}),
       WhatsAppSession.deleteMany({}),
@@ -170,8 +175,8 @@ export async function seedDemoData(reset = false): Promise<SeedResult> {
       trustScoreAtApplication: target.spec.trustScore,
       aiRecommendation: target.spec.trustScore >= 700 ? 'approve' : 'review',
       aiReason: `Trust score ${target.spec.trustScore}/1000 evaluated against on-chain repayment history.`,
-      approvals: spec.status === 'pending' ? 0 : 3,
-      approvalsRequired: 3,
+      approvals: spec.status === 'pending' ? 0 : LEADER_APPROVALS_REQUIRED,
+      approvalsRequired: LEADER_APPROVALS_REQUIRED,
       repaidAmount: spec.repaid,
       disbursedAt: spec.status === 'pending' ? undefined : new Date(Date.now() - 30 * 24 * 3600 * 1000),
       dueDate: new Date(Date.now() + 30 * 24 * 3600 * 1000),
@@ -180,18 +185,11 @@ export async function seedDemoData(reset = false): Promise<SeedResult> {
     loanCount += 1;
 
     if (spec.status === 'pending') {
-      await MultiSigActionModel.create({
-        id: uuidv4(),
-        type: 'loan_approval',
-        description: `Loan approval for ${target.spec.name}`,
+      await openLoanApproval({
+        loanId: String(loan._id),
+        memberName: target.spec.name,
         amount: spec.amount,
-        requestedBy: target.spec.name,
-        signatures: [],
-        signaturesRequired: 3,
-        status: 'pending',
-        linkedLoanId: String(loan._id),
-        destinationRole: 'leader',
-        createdAt: new Date().toISOString(),
+        isEmergency: /medical|hospital|emergency/i.test(spec.purpose),
       });
       pendingApprovals += 1;
     }
@@ -254,6 +252,76 @@ export async function seedDemoData(reset = false): Promise<SeedResult> {
     }
   }
 
+  // ── Planted anomalies, so the compliance agent has real work to do ──
+  //
+  // A clean ledger means the fraud detector correctly reports nothing, which
+  // demonstrates nothing. These are textbook AML typologies deliberately woven
+  // into the history — they are marked in the description so nobody mistakes
+  // them for an accident, and the agent is given no hint that they exist: it
+  // has to find them with the same rules it runs against real activity.
+  const anomalyCount = await Transaction.countDocuments({ description: /red-team pattern/i });
+  if (anomalyCount === 0) {
+    const structurer = createdMembers[5]?.doc; // Meera Patel — lowest trust tier
+    const roundTripper = createdMembers[3]?.doc; // Radha Krishnan
+
+    if (structurer) {
+      // Structuring: four legs, each just under the ₹10,000 reporting bar,
+      // inside 30 hours.
+      const base = Date.now() - 4 * 24 * 3600 * 1000;
+      for (let i = 0; i < 4; i += 1) {
+        const at = new Date(base + i * 8 * 3600 * 1000);
+        await Transaction.create({
+          user: structurer._id,
+          type: 'deposit',
+          amount: 9400,
+          description: `Cash deposit (red-team pattern: structuring leg ${i + 1}/4)`,
+          transactionId: simulatedTxId(`seed:anomaly:structuring:${structurer._id}:${i}`),
+          status: 'confirmed',
+          agentProcessed: false,
+          createdAt: at,
+          updatedAt: at,
+        });
+        transactionCount += 1;
+      }
+      structurer.totalSavings = (structurer.totalSavings || 0) + 4 * 9400;
+      await structurer.save();
+    }
+
+    if (roundTripper) {
+      // Layering: money in, near-identical amount straight back out.
+      const inAt = new Date(Date.now() - 2 * 24 * 3600 * 1000);
+      const outAt = new Date(inAt.getTime() + 5 * 3600 * 1000);
+
+      await Transaction.create({
+        user: roundTripper._id,
+        type: 'deposit',
+        amount: 18000,
+        description: 'Deposit from external source (red-team pattern: round-trip in)',
+        transactionId: simulatedTxId(`seed:anomaly:roundtrip:in:${roundTripper._id}`),
+        status: 'confirmed',
+        agentProcessed: false,
+        createdAt: inAt,
+        updatedAt: inAt,
+      });
+
+      await Transaction.create({
+        user: roundTripper._id,
+        type: 'withdrawal',
+        amount: 17500,
+        description: 'Same-day withdrawal (red-team pattern: round-trip out)',
+        transactionId: simulatedTxId(`seed:anomaly:roundtrip:out:${roundTripper._id}`),
+        status: 'confirmed',
+        agentProcessed: false,
+        createdAt: outAt,
+        updatedAt: outAt,
+      });
+
+      transactionCount += 2;
+      roundTripper.totalSavings = Math.max(0, (roundTripper.totalSavings || 0) + 500);
+      await roundTripper.save();
+    }
+  }
+
   // ── Staff ──
   let staffCount = 0;
   for (const spec of STAFF) {
@@ -273,6 +341,13 @@ export async function seedDemoData(reset = false): Promise<SeedResult> {
       /* passport minting is best effort during seed */
     }
   }
+
+  // ── Align the agent's vault position with the ledger we just built ──
+  // Without this the vault panel and the idle-fund advisor describe a treasury
+  // that does not exist, and idle funds clamp to zero.
+  await resetAgentStateFromLedger().catch((err) => {
+    console.warn('[seed] could not rebuild agent state:', err?.message || err);
+  });
 
   // ── Anchor the seed itself, so the chain has a genesis marker ──
   await anchorLedgerEntry({

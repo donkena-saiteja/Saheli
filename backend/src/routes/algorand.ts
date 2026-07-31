@@ -17,6 +17,12 @@ import {
   verifyOnChain,
 } from '../services/algorand';
 import User from '../models/User';
+import {
+  getInrToMicroAlgo,
+  getWalletBalance,
+  preparePayment,
+  submitPayment,
+} from '../services/walletPayments';
 
 const router = Router();
 
@@ -75,6 +81,79 @@ router.get('/wallet/:memberId', async (req: Request, res: Response) => {
       note: 'The member never handles keys or ALGO. The relayer pays every fee via Algorand fee pooling.',
     },
   });
+});
+
+// ─── Real wallet settlement ──────────────────────────────────────────────────
+// The relayer path degrades to simulated ids when it is unfunded. These three
+// endpoints let the user's own Pera wallet pay instead, which always produces a
+// genuine TestNet transaction that resolves on the Lora explorer.
+
+// GET /api/algorand/balance/:address — what the wallet actually holds
+router.get('/balance/:address', async (req: Request, res: Response) => {
+  res.json({ success: true, data: await getWalletBalance(req.params.address) });
+});
+
+// GET /api/algorand/rate — the demo rupee peg, so the UI can show both units
+router.get('/rate', async (_req: Request, res: Response) => {
+  const perInr = getInrToMicroAlgo();
+  res.json({
+    success: true,
+    data: {
+      microAlgosPerInr: perInr,
+      algosPerInr: perInr / 1e6,
+      inrPerAlgo: Math.round(1e6 / perInr),
+      note: 'Demo settlement peg for TestNet peer-to-peer transfers. Configure with INR_TO_MICROALGO.',
+    },
+  });
+});
+
+/**
+ * POST /api/algorand/payment/prepare
+ * Body: { fromAddress, amountInr, purpose, toAddress? | toMemberId?, memberId?, linkedLoanId?, description? }
+ *
+ * Returns an unsigned transaction for Pera to sign. The server builds it so the
+ * client cannot alter the receiver or the amount after the fact.
+ */
+router.post('/payment/prepare', async (req: Request, res: Response) => {
+  const prepared = await preparePayment({
+    fromAddress: String(req.body?.fromAddress || ''),
+    toAddress: req.body?.toAddress ? String(req.body.toAddress) : undefined,
+    toMemberId: req.body?.toMemberId ? String(req.body.toMemberId) : undefined,
+    amountInr: Number(req.body?.amountInr),
+    purpose: req.body?.purpose || 'deposit',
+    memberId: req.body?.memberId ? String(req.body.memberId) : undefined,
+    linkedLoanId: req.body?.linkedLoanId ? String(req.body.linkedLoanId) : undefined,
+    description: req.body?.description ? String(req.body.description) : undefined,
+  });
+
+  res.json({
+    success: true,
+    data: {
+      ...prepared,
+      message:
+        `Sign in Pera Wallet to send ${prepared.amountAlgos} ALGO ` +
+        `(₹${prepared.amountInr.toLocaleString('en-IN')}) to ${prepared.to.slice(0, 8)}….`,
+    },
+  });
+});
+
+/**
+ * POST /api/algorand/payment/submit
+ * Body: { signedTxn (base64), purpose, memberId?, linkedLoanId?, description? }
+ *
+ * Broadcasts, waits for confirmation, then writes the ledger row. Balances only
+ * move once the chain has accepted the transfer.
+ */
+router.post('/payment/submit', async (req: Request, res: Response) => {
+  const result = await submitPayment({
+    signedTxn: String(req.body?.signedTxn || ''),
+    purpose: req.body?.purpose || 'deposit',
+    memberId: req.body?.memberId ? String(req.body.memberId) : undefined,
+    linkedLoanId: req.body?.linkedLoanId ? String(req.body.linkedLoanId) : undefined,
+    description: req.body?.description ? String(req.body.description) : undefined,
+  });
+
+  res.json({ success: true, data: result });
 });
 
 export default router;

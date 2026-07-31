@@ -17,15 +17,29 @@ import {
   LifeBuoy,
   Save,
   Bell,
+  Loader2,
+  Wallet,
 } from 'lucide-react';
-import { useEffect, useRef, useState, useCallback } from 'react';
+import { useEffect, useMemo, useRef, useState, useCallback } from 'react';
 import { gsap } from 'gsap';
 import { useApiFetch, useApiPolling, useApiMutation } from '../hooks/useApi';
-import { statsApi, multisigApi, aiAgentApi, agentApi, transactionsApi, membersApi, loansApi, qrApi } from '../lib/api';
+import {
+  statsApi,
+  multisigApi,
+  aiAgentApi,
+  agentApi,
+  transactionsApi,
+  membersApi,
+  loansApi,
+  qrApi,
+  reportsApi,
+} from '../lib/api';
 import { toast } from 'sonner';
 import AgentTerminal from '../components/AgentTerminal';
 import IdleFundPanel from '../components/IdleFundPanel';
 import QRCodeDisplay from '../components/QRCodeDisplay';
+import AIAgentPanel from '../components/AIAgentPanel';
+import PeraPaymentButton from '../components/PeraPaymentButton';
 
 const Skeleton = ({ className = '' }: { className?: string }) => (
   <div className={`bg-surface animate-pulse rounded-lg ${className}`} />
@@ -57,22 +71,51 @@ export default function LeaderDashboard({ isReadOnly = false, activeSection = 't
   const [txForm, setTxForm] = useState({ memberId: '', type: 'deposit', amount: '', description: '' });
   const [loanQRCodes, setLoanQRCodes] = useState<Record<string, any>>({});
   const [settings, setSettings] = useState({ emergencyAlerts: true, dailyDigest: true });
+  /** Which approval card is mid-request, so only that card shows a spinner. */
+  const [busyActionId, setBusyActionId] = useState<string | null>(null);
+  const [exporting, setExporting] = useState(false);
+  const [payoutForm, setPayoutForm] = useState({ memberId: '', amount: '' });
 
-  const { data: treasury, loading: loadingTreasury } = useApiFetch(() => statsApi.getTreasury());
-  const { data: pendingActions, loading: loadingActions, refetch: refetchActions } = useApiPolling(() => multisigApi.getPending(), 4000);
+  const { data: treasury, loading: loadingTreasury, refetch: refetchTreasury } = useApiFetch(() => statsApi.getTreasury());
+  const { data: pendingActions, loading: loadingActions, refetch: refetchActions } = useApiPolling(() => multisigApi.getPending('leader'), 6000);
   const { data: aiLog, loading: loadingLog } = useApiPolling(() => aiAgentApi.getLog(), 8000);
-  const { data: aiInsights } = useApiFetch(() => aiAgentApi.getInsights());
   const { data: agentLog, refetch: refetchAgentLog } = useApiPolling(() => agentApi.getLog(), 6000);
   const { data: vaultData, loading: loadingVaults, refetch: refetchVaults } = useApiFetch(() => agentApi.getVaults());
   const { data: members } = useApiFetch(() => membersApi.getAll());
-  const { data: loans, loading: loadingLoans, refetch: refetchLoans } = useApiFetch(() => loansApi.getAll());
+  const { data: loans, loading: loadingLoans, refetch: refetchLoans } = useApiPolling(() => loansApi.getAll(), 8000);
+  const { data: treasuryBalance, refetch: refetchTreasuryBalance } = useApiPolling(
+    () => loansApi.getTreasuryBalance(),
+    8000,
+  );
   // Full SHG ledger for the audit view — every anchored movement, newest first.
   const { data: ledger, loading: loadingLedger } = useApiPolling(() => transactionsApi.getLedger(), 15000);
 
-  const { mutate: signAction, loading: signing } = useApiMutation((id: string) => multisigApi.sign(id, 'leader_current'));
-  const { mutate: rejectAction } = useApiMutation((id: string) => multisigApi.reject(id));
+  const { mutate: signAction } = useApiMutation((id: string) => multisigApi.sign(id, 'Leader'));
+  const { mutate: rejectAction } = useApiMutation((input: { id: string; reason?: string }) =>
+    multisigApi.reject(input.id, input.reason, 'Leader'),
+  );
   const { mutate: createTransaction, loading: creatingTx } = useApiMutation((body: any) => transactionsApi.create(body));
-  const { mutate: approveLoan, loading: approvingLoan } = useApiMutation((id: string) => loansApi.approve(id));
+
+  /**
+   * Loans indexed by id so an approval card can show the purpose, the AI
+   * recommendation and the borrower's trust score without a second request.
+   */
+  const loansById = useMemo(() => {
+    const map = new Map<string, any>();
+    for (const loan of loans || []) map.set(String(loan.id), loan);
+    return map;
+  }, [loans]);
+
+  /** Every refresh that a settled approval invalidates, in one call. */
+  const refreshAfterSettlement = useCallback(async () => {
+    await Promise.all([
+      refetchActions(),
+      refetchLoans(),
+      refetchTreasury(),
+      refetchTreasuryBalance(),
+      refetchAgentLog(),
+    ]);
+  }, [refetchActions, refetchLoans, refetchTreasury, refetchTreasuryBalance, refetchAgentLog]);
 
   useEffect(() => {
     if (!txForm.memberId && members && members.length > 0) {
@@ -91,26 +134,43 @@ export default function LeaderDashboard({ isReadOnly = false, activeSection = 't
     }
   }, [loadingTreasury]);
 
+  /**
+   * A single leader signature approves and settles the loan.
+   * `busyActionId` scopes the spinner to the card that was clicked, so
+   * approving one request never greys out the rest of the queue.
+   */
   const handleApprove = async (id: string) => {
+    setBusyActionId(id);
     try {
       const res = await signAction(id);
-      setActionMessages(prev => ({ ...prev, [id]: res.message }));
+      setActionMessages((prev) => ({ ...prev, [id]: res.message }));
       toast.success(res.message);
-      refetchActions();
-    } catch {
-      toast.error('Could not sign — is the API running?');
+      if (res.settlement?.requiresWalletSettlement && res.settlement?.walletHint) {
+        toast.info(res.settlement.walletHint, { duration: 8000 });
+      }
+      await refreshAfterSettlement();
+    } catch (err) {
+      toast.error((err as Error).message || 'Could not approve — is the API running?');
     }
+    setBusyActionId(null);
   };
 
-  const handleReject = async (id: string) => {
+  const handleReject = async (id: string, description: string) => {
+    const reason = window.prompt(`Decline "${description}". Reason (optional):`, '');
+    // `prompt` returns null on Cancel and '' when submitted empty — only the
+    // former means the leader backed out.
+    if (reason === null) return;
+
+    setBusyActionId(id);
     try {
-      const res = await rejectAction(id);
-      setActionMessages(prev => ({ ...prev, [id]: res.message }));
-      toast.error(res.message);
-      refetchActions();
-    } catch {
-      toast.error('Could not reject action');
+      const res = await rejectAction({ id, reason: reason || undefined });
+      setActionMessages((prev) => ({ ...prev, [id]: res.message }));
+      toast.success(res.message);
+      await refreshAfterSettlement();
+    } catch (err) {
+      toast.error((err as Error).message || 'Could not decline this request');
     }
+    setBusyActionId(null);
   };
 
   const handleInvest = useCallback(async () => {
@@ -139,24 +199,16 @@ export default function LeaderDashboard({ isReadOnly = false, activeSection = 't
     setHarvesting(false);
   }, [refetchVaults, refetchAgentLog]);
 
-  const handleExportReport = () => {
-    const rows = [
-      ['Section', 'Metric', 'Value'],
-      ['Treasury', 'Total Liquidity', String(treasury?.totalLiquidity || 0)],
-      ['Treasury', 'Yield This Month', String(treasury?.yieldThisMonth || 0)],
-      ['Approvals', 'Pending Leader Approvals', String((pendingActions || []).length)],
-      ['Loans', 'Pending Loan Requests', String((loans || []).filter((l: any) => l.status === 'pending').length)],
-      ['Loans', 'Approved Loans', String((loans || []).filter((l: any) => l.status === 'approved').length)],
-    ];
-    const csv = rows.map((r) => r.map((v) => `"${String(v).replace(/"/g, '""')}"`).join(',')).join('\n');
-    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `saheli-leader-report-${Date.now()}.csv`;
-    a.click();
-    URL.revokeObjectURL(url);
-    toast.success('Report exported successfully');
+  /** Six-sheet Excel pack, generated server-side from the live ledger. */
+  const handleExportReport = async () => {
+    setExporting(true);
+    try {
+      const result = await reportsApi.download('full-ledger', 'xlsx');
+      toast.success(`Downloaded ${result.filename} (${Math.round(result.bytes / 1024)} KB)`);
+    } catch (err) {
+      toast.error((err as Error).message || 'Export failed');
+    }
+    setExporting(false);
   };
 
   const handleCreateTransaction = async () => {
@@ -176,24 +228,15 @@ export default function LeaderDashboard({ isReadOnly = false, activeSection = 't
       toast.success('Transaction created successfully');
       setShowTxModal(false);
       setTxForm({ memberId: txForm.memberId, type: 'deposit', amount: '', description: '' });
+      await refreshAfterSettlement();
     } catch {
       toast.error('Transaction failed. Check backend connection.');
     }
   };
 
-  const handleApproveLoan = async (loanId: string) => {
-    try {
-      const res = await approveLoan(loanId);
-      toast.success(res.message || 'Loan approval recorded');
-      refetchLoans();
-    } catch {
-      toast.error('Unable to approve loan');
-    }
-  };
-
   const handleGenerateLoanQR = async (loan: any) => {
-    if (loan.status !== 'approved' || !loan.transactionId) {
-      toast.error('Loan must be approved before generating QR');
+    if (!loan.transactionId) {
+      toast.error('Loan must be approved and settled before generating QR');
       return;
     }
     try {
@@ -248,25 +291,16 @@ export default function LeaderDashboard({ isReadOnly = false, activeSection = 't
 
   if (activeSection === 'ai') {
     return (
-      <div className="p-6 lg:p-10 max-w-5xl mx-auto space-y-6">
+      <div className="p-6 lg:p-10 max-w-6xl mx-auto space-y-6">
         <div>
-          <p className="text-xs font-bold uppercase tracking-wider text-shg-primary mb-2">AI Insights</p>
-          <h2 className="text-2xl font-black font-headline text-on-surface">Agentic Recommendations</h2>
+          <p className="text-xs font-bold uppercase tracking-wider text-shg-primary mb-2">Agentic AI</p>
+          <h2 className="text-2xl font-black font-headline text-on-surface">Compliance & Treasury Agent</h2>
+          <p className="text-sm text-muted-foreground mt-1 max-w-2xl">
+            Monitors every transaction for fraud and illegal activity, and allocates idle savings into Government of
+            India schemes so the pool never sits still.
+          </p>
         </div>
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-          {(aiInsights?.insights || []).map((insight: any, idx: number) => (
-            <div key={idx} className="bg-white border border-border/50 rounded-2xl p-5">
-              <p className="text-xs font-bold uppercase text-muted-foreground">{insight.type?.replace(/_/g, ' ')}</p>
-              <h3 className="font-bold text-on-surface mt-2">{insight.title}</h3>
-              <p className="text-sm text-muted-foreground mt-2">{insight.body}</p>
-              <span className={`inline-flex mt-3 px-2.5 py-1 rounded-full text-[10px] font-bold ${
-                insight.priority === 'high' ? 'bg-red-50 text-red-700' : insight.priority === 'medium' ? 'bg-amber-50 text-amber-700' : 'bg-emerald-50 text-emerald-700'
-              }`}>
-                {insight.priority} priority
-              </span>
-            </div>
-          ))}
-        </div>
+        <AIAgentPanel canReview showSimulator />
       </div>
     );
   }
@@ -336,14 +370,28 @@ export default function LeaderDashboard({ isReadOnly = false, activeSection = 't
                       {String(tx.event || '').replace(/_/g, ' ')}
                     </p>
                     {tx.transactionId ? (
-                      <a
-                        href={tx.explorerUrl || `https://lora.algokit.io/testnet/transaction/${tx.transactionId}`}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="text-[11px] font-mono text-shg-primary hover:underline break-all"
-                      >
-                        {tx.transactionId}
-                      </a>
+                      <span className="flex flex-wrap items-center gap-1.5">
+                        <a
+                          href={tx.explorerUrl || `https://lora.algokit.io/testnet/transaction/${tx.transactionId}`}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="text-[11px] font-mono text-shg-primary hover:underline break-all"
+                        >
+                          {tx.transactionId}
+                        </a>
+                        <span
+                          className={`text-[9px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded ${
+                            tx.onChain ? 'bg-emerald-50 text-emerald-700' : 'bg-slate-100 text-slate-500'
+                          }`}
+                          title={
+                            tx.onChain
+                              ? 'Broadcast and confirmed on Algorand — this link resolves.'
+                              : 'Anchored locally while the relayer was unfunded. This id does not exist on chain.'
+                          }
+                        >
+                          {tx.onChain ? 'on-chain' : 'local'}
+                        </span>
+                      </span>
                     ) : (
                       <span className="text-[11px] font-mono text-muted-foreground">{tx.txId}</span>
                     )}
@@ -407,9 +455,14 @@ export default function LeaderDashboard({ isReadOnly = false, activeSection = 't
             </div>
           ) : (
             <div className="flex gap-3">
-              <button onClick={handleExportReport} className="px-5 py-2.5 bg-surface text-on-surface rounded-full font-semibold text-sm hover:bg-surface-container transition-colors flex items-center gap-2">
-                <FileText className="w-4 h-4" />
-                Export Report
+              <button
+                onClick={handleExportReport}
+                disabled={exporting}
+                title="Six-sheet Excel workbook: summary, transactions, members, loans, disbursements, compliance"
+                className="px-5 py-2.5 bg-surface text-on-surface rounded-full font-semibold text-sm hover:bg-surface-container transition-colors flex items-center gap-2 disabled:opacity-60"
+              >
+                {exporting ? <Loader2 className="w-4 h-4 animate-spin" /> : <FileText className="w-4 h-4" />}
+                {exporting ? 'Building…' : 'Export Excel'}
               </button>
               <button onClick={() => setShowTxModal(true)} className="px-5 py-2.5 bg-shg-primary text-white rounded-full font-semibold text-sm hover:opacity-90 transition-opacity flex items-center gap-2 shadow-lg shadow-shg-primary/20">
                 <Plus className="w-4 h-4" />
@@ -429,15 +482,18 @@ export default function LeaderDashboard({ isReadOnly = false, activeSection = 't
               <TrendingUp className="w-5 h-5 text-shg-secondary" />
             </div>
           </div>
-          {loadingTreasury ? <Skeleton className="h-9 w-36 mb-2" /> : (
+          {loadingTreasury && !treasury ? <Skeleton className="h-9 w-36 mb-2" /> : (
             <div className="text-3xl font-black font-headline text-on-surface">
-              ₹{treasury?.totalLiquidity?.toLocaleString('en-IN')}
+              ₹{(treasuryBalance?.balance ?? treasury?.totalLiquidity ?? 0).toLocaleString('en-IN')}
             </div>
           )}
           <div className="flex items-center gap-1 text-shg-secondary text-sm font-semibold mt-2">
             <ArrowUpRight className="w-4 h-4" />
             +{loadingTreasury ? '...' : treasury?.yieldThisMonth}% yield this month
           </div>
+          <p className="text-[10px] text-muted-foreground mt-1">
+            Falls immediately when you approve a loan.
+          </p>
         </div>
 
         <div className="dashboard-card bg-white p-6 rounded-2xl border border-border/50">
@@ -478,83 +534,25 @@ export default function LeaderDashboard({ isReadOnly = false, activeSection = 't
         </div>
       </div>
 
-      {/* Loan approvals (leader gating before QR) */}
-      <section className="bg-white border border-border/50 rounded-2xl p-6">
-        <div className="flex items-center justify-between mb-5">
-          <h3 className="text-lg font-bold font-headline text-on-surface">Loan Requests</h3>
-          <span className="text-xs font-bold text-muted-foreground">
-            {(loans || []).filter((l: any) => l.status === 'pending').length} pending approvals
-          </span>
-        </div>
-
-        {loadingLoans ? (
-          <Skeleton className="h-24 w-full" />
-        ) : (loans || []).length === 0 ? (
-          <p className="text-sm text-muted-foreground">No loan requests found.</p>
-        ) : (
-          <div className="space-y-4">
-            {(loans || []).slice(0, 6).map((loan: any) => (
-              <div key={loan.id} className="p-4 bg-surface rounded-xl border border-border/40">
-                <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
-                  <div>
-                    <p className="font-bold text-on-surface">{loan.memberName} · ₹{loan.amount?.toLocaleString('en-IN')}</p>
-                    <p className="text-xs text-muted-foreground mt-1">Purpose: {loan.purpose}</p>
-                    <p className="text-xs text-muted-foreground">Status: <span className="font-semibold uppercase">{loan.status}</span> ({loan.approvals}/{loan.approvalsRequired})</p>
-                  </div>
-                  <div className="flex items-center gap-2">
-                    {loan.status === 'pending' && !isReadOnly && (
-                      <button
-                        onClick={() => handleApproveLoan(loan.id)}
-                        disabled={approvingLoan}
-                        className="px-4 py-2 bg-shg-primary text-white rounded-lg text-sm font-bold disabled:opacity-60"
-                      >
-                        Approve Loan
-                      </button>
-                    )}
-                    <button
-                      onClick={() => handleGenerateLoanQR(loan)}
-                      disabled={loan.status !== 'approved'}
-                      className="px-4 py-2 border border-border rounded-lg text-sm font-bold hover:bg-white disabled:opacity-50"
-                    >
-                      Generate QR
-                    </button>
-                  </div>
-                </div>
-                {loanQRCodes[loan.id] && (
-                  <div className="mt-3">
-                    <QRCodeDisplay
-                      qrCode={loanQRCodes[loan.id].qrCode}
-                      transactionId={loanQRCodes[loan.id].transactionId}
-                      amount={loan.amount}
-                      memberName={loan.memberName}
-                      type="loan_disbursement"
-                      compact={true}
-                    />
-                  </div>
-                )}
-              </div>
-            ))}
-          </div>
-        )}
-      </section>
-
-      {/* Main Content Grid — Multi-Sig + Classic AI Log */}
+      {/* ── Approval queue — ONE card per loan, ONE leader signature ────────── */}
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
-        {/* Multi-Sig Pending Actions */}
         <div className="lg:col-span-8 space-y-4">
-          <div className="flex items-center justify-between">
+          <div className="flex flex-wrap items-center justify-between gap-2">
             <h3 className="text-lg font-bold font-headline text-on-surface flex items-center gap-2">
               <Shield className="w-5 h-5 text-shg-primary" />
-              Multi-Leader Pending Actions
+              Approval Queue
             </h3>
-            {!loadingActions && (
+            <div className="flex items-center gap-2">
               <span className="px-3 py-1 bg-shg-tertiary/10 text-shg-tertiary rounded-full text-xs font-bold">
-                {pendingActions?.length || 0} REQUIRES APPROVAL
+                {(pendingActions || []).length} AWAITING YOU
               </span>
-            )}
+              <span className="px-3 py-1 bg-surface text-muted-foreground rounded-full text-xs font-bold">
+                Single leader signature
+              </span>
+            </div>
           </div>
 
-          {loadingActions ? (
+          {loadingActions && (pendingActions || []).length === 0 ? (
             <div className="space-y-4">
               {[1, 2].map(i => <Skeleton key={i} className="h-32 w-full rounded-2xl" />)}
             </div>
@@ -562,71 +560,179 @@ export default function LeaderDashboard({ isReadOnly = false, activeSection = 't
             <div className="bg-white rounded-2xl border border-border/50 p-10 text-center">
               <CheckCircle2 className="w-10 h-10 text-shg-secondary mx-auto mb-3" />
               <p className="font-bold text-on-surface">All clear! No pending approvals.</p>
+              <p className="text-sm text-muted-foreground mt-1">
+                New loan requests appear here the moment a member submits one.
+              </p>
             </div>
           ) : (
-            (pendingActions || []).map((action: any) => (
-              <div key={action.id} className={`dashboard-card bg-white p-6 rounded-2xl border-l-4 border border-border/50 ${action.isEmergency ? 'border-l-red-500' : 'border-l-shg-primary'}`}>
-                {action.isEmergency && (
-                  <div className="flex items-center gap-2 mb-3 px-3 py-1.5 bg-red-50 border border-red-100 rounded-lg w-fit">
-                    <ShieldAlert className="w-3.5 h-3.5 text-red-500" />
-                    <span className="text-[10px] font-bold text-red-600 uppercase tracking-wider">Emergency Override · 1-of-3 Threshold</span>
-                  </div>
-                )}
-                <div className="flex flex-col md:flex-row md:items-center justify-between gap-6">
-                  <div className="space-y-1">
-                    <div className="flex items-center gap-2">
-                      <span className="font-bold text-on-surface font-headline">{action.description}</span>
-                      <span className="text-xs px-2 py-0.5 bg-surface rounded text-muted-foreground">
-                        ID: #{action.id.slice(0, 4).toUpperCase()}
+            (pendingActions || []).map((action: any) => {
+              const loan = action.linkedLoanId ? loansById.get(String(action.linkedLoanId)) : null;
+              const busy = busyActionId === action.id;
+
+              return (
+                <div
+                  key={action.id}
+                  className={`bg-white p-6 rounded-2xl border-l-4 border border-border/50 ${
+                    action.isEmergency ? 'border-l-red-500' : 'border-l-shg-primary'
+                  }`}
+                >
+                  {action.isEmergency && (
+                    <div className="flex items-center gap-2 mb-3 px-3 py-1.5 bg-red-50 border border-red-100 rounded-lg w-fit">
+                      <ShieldAlert className="w-3.5 h-3.5 text-red-500" />
+                      <span className="text-[10px] font-bold text-red-600 uppercase tracking-wider">
+                        Emergency request · expedited
                       </span>
                     </div>
-                    <p className="text-sm text-muted-foreground">
-                      Requested by <span className="font-semibold">{action.requestedBy}</span>
-                    </p>
-                    <div className="text-xl font-black font-headline text-shg-primary mt-2">
-                      ₹{action.amount?.toLocaleString('en-IN')}
-                    </div>
-                    {actionMessages[action.id] && (
-                      <p className="text-xs font-semibold text-shg-secondary bg-shg-secondary/10 px-3 py-1 rounded-lg mt-2">
-                        {actionMessages[action.id]}
+                  )}
+
+                  <div className="flex flex-col lg:flex-row lg:items-start justify-between gap-6">
+                    <div className="min-w-0 flex-1 space-y-2">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="font-bold text-on-surface font-headline">{action.description}</span>
+                        <span className="text-xs px-2 py-0.5 bg-surface rounded text-muted-foreground font-mono">
+                          #{action.id.slice(0, 4).toUpperCase()}
+                        </span>
+                      </div>
+
+                      <p className="text-sm text-muted-foreground">
+                        Requested by <span className="font-semibold">{action.requestedBy}</span>
+                        {loan?.purpose ? ` · ${loan.purpose}` : ''}
                       </p>
-                    )}
-                    <div className="w-full md:w-64 space-y-3">
-                      <div className="flex justify-between text-xs font-bold text-muted-foreground">
-                        <span>APPROVAL PROGRESS</span>
-                        <span>{action.signatures.length}/{action.signaturesRequired} APPROVED</span>
+
+                      <div className="text-2xl font-black font-headline text-shg-primary">
+                        ₹{action.amount?.toLocaleString('en-IN')}
                       </div>
-                      <div className="h-2 bg-surface rounded-full overflow-hidden">
-                        <div
-                          className="h-full bg-shg-primary rounded-full transition-all duration-500"
-                          style={{ width: `${(action.signatures.length / action.signaturesRequired) * 100}%` }}
-                        />
-                      </div>
-                      {isReadOnly ? (
-                        <p className="text-xs text-muted-foreground italic text-center py-1">Approval requires Leader role</p>
-                      ) : (
-                        <div className="flex gap-2">
-                          <button
-                            onClick={() => handleApprove(action.id)}
-                            disabled={signing}
-                            className="flex-1 py-2 bg-shg-primary text-white rounded-lg text-sm font-bold active:scale-95 transition-transform hover:opacity-90 disabled:opacity-60"
+
+                      {loan && (
+                        <div className="flex flex-wrap gap-2 pt-1">
+                          <span
+                            className={`text-[10px] font-bold uppercase tracking-wider px-2 py-1 rounded ${
+                              loan.aiRecommendation === 'approve'
+                                ? 'bg-emerald-50 text-emerald-700'
+                                : loan.aiRecommendation === 'review'
+                                  ? 'bg-amber-50 text-amber-700'
+                                  : 'bg-red-50 text-red-700'
+                            }`}
                           >
-                            {signing ? '...' : 'Approve'}
-                          </button>
-                          <button
-                            onClick={() => handleReject(action.id)}
-                            className="px-3 py-2 border border-border text-shg-error rounded-lg text-sm font-bold hover:bg-shg-error/10 transition-colors"
-                          >
-                            <X className="w-4 h-4" />
-                          </button>
+                            AI: {loan.aiRecommendation}
+                          </span>
+                          <span className="text-[10px] font-bold uppercase tracking-wider px-2 py-1 rounded bg-surface text-muted-foreground">
+                            Trust {loan.trustScoreAtApplication}/1000
+                          </span>
                         </div>
                       )}
+
+                      {loan?.aiReason && (
+                        <p className="text-xs text-muted-foreground bg-surface rounded-lg px-3 py-2 mt-1">
+                          {loan.aiReason}
+                        </p>
+                      )}
+
+                      {actionMessages[action.id] && (
+                        <p className="text-xs font-semibold text-shg-secondary bg-shg-secondary/10 px-3 py-2 rounded-lg">
+                          {actionMessages[action.id]}
+                        </p>
+                      )}
                     </div>
+
+                    {isReadOnly ? (
+                      <p className="text-xs text-muted-foreground italic py-1">Approval requires the Leader role</p>
+                    ) : (
+                      <div className="flex flex-row lg:flex-col gap-2 lg:w-44 flex-shrink-0">
+                        <button
+                          onClick={() => handleApprove(action.id)}
+                          disabled={busy}
+                          className="flex-1 py-2.5 px-4 bg-shg-primary text-white rounded-lg text-sm font-bold active:scale-95 transition-transform hover:opacity-90 disabled:opacity-60 inline-flex items-center justify-center gap-2"
+                        >
+                          {busy ? <Loader2 className="w-4 h-4 animate-spin" /> : <CheckCircle2 className="w-4 h-4" />}
+                          {busy ? 'Settling…' : 'Approve'}
+                        </button>
+                        <button
+                          onClick={() => handleReject(action.id, action.description)}
+                          disabled={busy}
+                          className="flex-1 py-2.5 px-4 border border-border text-shg-error rounded-lg text-sm font-bold hover:bg-shg-error/10 transition-colors disabled:opacity-60 inline-flex items-center justify-center gap-2"
+                        >
+                          <X className="w-4 h-4" />
+                          Decline
+                        </button>
+                        <p className="hidden lg:block text-[10px] text-muted-foreground text-center leading-snug">
+                          Approving debits the treasury immediately.
+                        </p>
+                      </div>
+                    )}
                   </div>
                 </div>
-              </div>
-            ))
+              );
+            })
           )}
+
+          {/* Loan book — read-only history, with QR proof for settled loans */}
+          <section className="bg-white border border-border/50 rounded-2xl p-6">
+            <div className="flex items-center justify-between mb-5">
+              <h3 className="text-lg font-bold font-headline text-on-surface">Loan Book</h3>
+              <span className="text-xs font-bold text-muted-foreground">
+                {(loans || []).length} total · {(loans || []).filter((l: any) => l.status === 'pending').length} pending
+              </span>
+            </div>
+
+            {loadingLoans && (loans || []).length === 0 ? (
+              <Skeleton className="h-24 w-full" />
+            ) : (loans || []).length === 0 ? (
+              <p className="text-sm text-muted-foreground">No loan requests found.</p>
+            ) : (
+              <div className="space-y-3">
+                {(loans || []).slice(0, 8).map((loan: any) => (
+                  <div key={loan.id} className="p-4 bg-surface rounded-xl border border-border/40">
+                    <div className="flex flex-col md:flex-row md:items-center justify-between gap-3">
+                      <div className="min-w-0">
+                        <p className="font-bold text-on-surface text-sm">
+                          {loan.memberName} · ₹{loan.amount?.toLocaleString('en-IN')}
+                        </p>
+                        <p className="text-xs text-muted-foreground mt-0.5">{loan.purpose}</p>
+                        <div className="flex flex-wrap items-center gap-2 mt-1.5">
+                          <span
+                            className={`text-[10px] font-bold uppercase px-2 py-0.5 rounded ${
+                              loan.status === 'repaid'
+                                ? 'bg-emerald-50 text-emerald-700'
+                                : loan.status === 'repaying'
+                                  ? 'bg-shg-primary/10 text-shg-primary'
+                                  : loan.status === 'rejected'
+                                    ? 'bg-red-50 text-red-700'
+                                    : 'bg-amber-50 text-amber-700'
+                            }`}
+                          >
+                            {loan.status}
+                          </span>
+                          <span className="text-[10px] text-muted-foreground">
+                            {loan.approvals}/{loan.approvalsRequired} approval
+                          </span>
+                        </div>
+                      </div>
+                      <button
+                        onClick={() => handleGenerateLoanQR(loan)}
+                        disabled={!loan.transactionId}
+                        className="px-4 py-2 border border-border rounded-lg text-xs font-bold hover:bg-white disabled:opacity-40 flex-shrink-0"
+                      >
+                        Generate QR
+                      </button>
+                    </div>
+                    {loanQRCodes[loan.id] && (
+                      <div className="mt-3">
+                        <QRCodeDisplay
+                          qrCode={loanQRCodes[loan.id].qrCode}
+                          transactionId={loanQRCodes[loan.id].transactionId}
+                          amount={loan.amount}
+                          memberName={loan.memberName}
+                          type="loan_disbursement"
+                          compact={true}
+                        />
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+          </section>
         </div>
 
         {/* Classic AI Treasury Log */}
@@ -684,6 +790,69 @@ export default function LeaderDashboard({ isReadOnly = false, activeSection = 't
           </div>
         </div>
       </div>
+
+      {/* ─── Real on-chain payout ─────────────────────────────────────────────
+          The relayer path anchors locally when it is unfunded, which produces a
+          transaction id that does not exist on chain. Paying from the leader's
+          own Pera wallet always settles for real, so the explorer link
+          resolves and the money visibly leaves the wallet. */}
+      {!isReadOnly && (
+        <section className="bg-white border border-border/50 rounded-2xl p-6">
+          <div className="flex items-center gap-3 mb-4">
+            <div className="w-9 h-9 rounded-xl bg-[#FFEE55] flex items-center justify-center">
+              <Wallet className="w-5 h-5 text-slate-900" />
+            </div>
+            <div>
+              <h2 className="text-lg font-black font-headline text-on-surface">Settle a Payout On-Chain</h2>
+              <p className="text-xs text-muted-foreground">
+                Debits your connected Pera Wallet and credits the member's Algorand account — live on TestNet.
+              </p>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-4 items-end">
+            <div>
+              <label className="text-xs font-bold uppercase text-muted-foreground">Pay to member</label>
+              <select
+                value={payoutForm.memberId}
+                onChange={(e) => setPayoutForm((s) => ({ ...s, memberId: e.target.value }))}
+                className="mt-1 w-full border border-border rounded-lg px-3 py-2 text-sm"
+              >
+                <option value="">Select a member…</option>
+                {(members || []).map((m: any) => (
+                  <option key={m._id || m.id} value={m._id || m.id}>
+                    {m.name}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div>
+              <label className="text-xs font-bold uppercase text-muted-foreground">Amount (₹)</label>
+              <input
+                type="number"
+                min={1}
+                value={payoutForm.amount}
+                onChange={(e) => setPayoutForm((s) => ({ ...s, amount: e.target.value }))}
+                className="mt-1 w-full border border-border rounded-lg px-3 py-2 text-sm"
+                placeholder="2000"
+              />
+            </div>
+            <PeraPaymentButton
+              amountInr={Number(payoutForm.amount) || 0}
+              purpose="loan_disbursement"
+              toMemberId={payoutForm.memberId || undefined}
+              memberId={payoutForm.memberId || undefined}
+              description="Leader payout settled from Pera Wallet"
+              disabled={!payoutForm.memberId || !(Number(payoutForm.amount) > 0)}
+              label={`Send ₹${(Number(payoutForm.amount) || 0).toLocaleString('en-IN')} from Pera`}
+              onSettled={() => {
+                setPayoutForm((s) => ({ ...s, amount: '' }));
+                void refreshAfterSettlement();
+              }}
+            />
+          </div>
+        </section>
+      )}
 
       {/* ─── AI Vault Manager Section ─────────────────────────────────────────── */}
       <section>

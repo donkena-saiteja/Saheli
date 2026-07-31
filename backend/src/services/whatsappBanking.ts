@@ -21,11 +21,10 @@ import WhatsAppSession, { SessionState } from '../models/WhatsAppSession';
 import User from '../models/User';
 import Transaction from '../models/Transaction';
 import LoanModel from '../models/Loan';
-import MultiSigActionModel from '../models/MultiSigAction';
-import { v4 as uuidv4 } from 'uuid';
 import { anchorLedgerEntry, explorerTxUrl } from './algorand';
 import { applyPassportEvent, getOrMintPassport, serializePassport } from './dsbt';
 import { processEmergencyLoan } from './agentEngine';
+import { LEADER_APPROVALS_REQUIRED, openLoanApproval } from './loanWorkflow';
 import { registerTransactionLifecycle, setTransactionLifecycleStatus } from './txEngine';
 
 const SESSION_TIMEOUT_MS = Number(process.env.WHATSAPP_SESSION_TIMEOUT_MS || 10 * 60 * 1000);
@@ -917,22 +916,15 @@ async function executeConfirmedAction(
       aiRecommendation: (user.trustScore || 750) >= 700 ? 'approve' : 'review',
       aiReason: result.reason,
       approvals: 0,
-      approvalsRequired: result.threshold,
+      approvalsRequired: LEADER_APPROVALS_REQUIRED,
       repaidAmount: 0,
     });
 
-    await MultiSigActionModel.create({
-      id: uuidv4(),
-      type: 'loan_approval',
-      description: `Loan approval for ${user.name}`,
+    await openLoanApproval({
+      loanId: String(loan._id),
+      memberName: user.name,
       amount,
-      requestedBy: user.name,
-      signatures: [],
-      signaturesRequired: result.threshold,
-      status: 'pending',
-      linkedLoanId: String(loan._id),
-      destinationRole: 'leader',
-      createdAt: new Date().toISOString(),
+      isEmergency: /medical|hospital|emergency|health|accident|urgent/i.test(purpose),
     });
 
     return reply(
@@ -944,7 +936,7 @@ async function executeConfirmedAction(
         '',
         result.reason,
         '',
-        `Routed for *${result.threshold}-of-3* leader approval.`,
+        `Routed for *${LEADER_APPROVALS_REQUIRED}* SHG leader approval.`,
         'You will get a WhatsApp update as soon as it is reviewed.',
         '',
         'Reply *5* to check status anytime.',

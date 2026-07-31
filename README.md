@@ -16,14 +16,15 @@ Tracks: *Blockchain with Algorand* · *Agentic AI × Blockchain*
 | **x402 Pay-per-Use Payments** (mandatory) | ✅ Implemented — x402 v2, `exact` scheme on `algorand:SGO1GKSzyE7IEPItTxCByw9x8FmnrCDe` | [`backend/src/x402/`](backend/src/x402/) |
 | **AlgoKit** | ✅ 3 Algorand Python contracts, compiled to TEAL v11 | [`contracts/`](contracts/) |
 | **Pera Wallet sign-in** | ✅ Challenge/response, single-use nonce, ed25519 verified server-side | [`backend/src/services/walletAuth.ts`](backend/src/services/walletAuth.ts) · [`app/src/lib/pera.ts`](app/src/lib/pera.ts) |
-| **Fully functional during evaluation** | ✅ 29/29 automated checks — `npm run verify` | [`backend/src/scripts/verify.ts`](backend/src/scripts/verify.ts) |
+| **Agentic AI** | ✅ Autonomous compliance + treasury agent, OpenAI-reasoned | [`backend/src/services/aiMonitor.ts`](backend/src/services/aiMonitor.ts) |
+| **Fully functional during evaluation** | ✅ 44/44 automated checks — `npm run verify` | [`backend/src/scripts/verify.ts`](backend/src/scripts/verify.ts) |
 
 ```bash
 cd backend && npm run verify
 ```
 
 ```
-ALL 29 CHECKS PASSED
+ALL 44 CHECKS PASSED
 ```
 
 ---
@@ -88,14 +89,20 @@ Compiled TEAL is already committed, so this is only needed to re-verify or deplo
 
 | What you want to see | Where |
 |---|---|
-| **All transactions** | Leader dashboard → **Audit Logs** → *On-Chain Transaction Ledger* (whole SHG, every txid clickable) |
+| **All transactions** | Bank → **Audit Directory** (searchable, filterable, exportable) · Leader → **Audit Logs** |
 | One member's transactions | Member dashboard → **Audit Logs** (searchable, with status + explorer links) |
+| **Download it all as Excel** | Bank → *Audit Directory* → **Full Pack (.xlsx)** — six sheets |
+| **AI fraud detection** | Leader → **AI Insights** → *Fraud Monitor*. Hit **Simulate Threat** to watch it fire |
+| **Government scheme advice** | Leader → **AI Insights** → *Idle Fund Advisor* |
+| **Approving a loan** | Leader → *Approval Queue* — one card per loan, one click, treasury drops immediately |
+| **Money leaving a wallet** | Member → *My Pera Wallet* → **Pay from Pera Wallet** (real TestNet transfer) |
 | Transactions as raw JSON | `GET /api/transactions/ledger?limit=100` · `GET /api/transactions?memberId=<id>` |
 | A single transaction on chain | `GET /api/algorand/tx/:txId`, or open `https://lora.algokit.io/testnet/transaction/<txId>` |
 | Independent proof of a transaction | `GET /api/qr/verify/:transactionId` — checks Algorand first, our ledger second |
-| **x402 working, visually** | Any dashboard → **x402 Pay-per-Use** (see the next section) |
+| **x402 working, visually** | Any dashboard → **x402 Pay-per-Use** |
 | x402 revenue routed to SHGs | `GET /api/x402/revenue`, or the revenue panel in the x402 console |
-| Wallet/relayer/chain status | `GET /api/algorand/info` and `/health` |
+| Wallet/relayer/chain status | `GET /api/algorand/info` and `/health` · the banner on every dashboard |
+| Your own profile / wallet / sign out | Click the **avatar in the top bar** |
 
 > **Note on `txId` vs `transactionId`.** Ledger list responses carry both: `txId` is truncated for narrow UI rows, `transactionId` is the full 52-character Algorand id. Always use `transactionId` for lookups — the truncated one resolves to nothing.
 
@@ -183,7 +190,107 @@ Typed against the **official `@x402/core` and `@x402/avm` v2.20 packages**, so t
 
 ---
 
-## 2. WhatsApp banking — exactly like SBI
+## 2. The autonomous AI agent
+
+Two jobs, both running without a human in the loop.
+
+### Job 1 — watch every rupee for fraud and illegal activity
+
+The agent reads the entire ledger and applies nine money-laundering typologies. Detection is **deterministic** and runs on our own data; **OpenAI** then reasons about each signal, sets the final severity, and writes the recommendation a village SHG leader can act on. That split matters: with no API key the agent still detects and still files alerts — it just writes them itself.
+
+| Typology | What it catches |
+|---|---|
+| **Structuring** | Legs deliberately kept under the ₹10,000 / ₹50,000 reporting bar that sum above it |
+| **Round-tripping** | Money in, near-identical amount straight back out — the pool used as a pass-through |
+| **Velocity** | Mule-account bursts: many movements in one hour against a weekly-cadence group |
+| **Dormant spike** | A 45-day-silent account suddenly moving 5× its own average |
+| **Over-exposure** | Borrowing beyond NABARD's 3× savings-linked credit ceiling |
+| **Duplicate reference** | One settlement id credited to two different members |
+| **Unverifiable anchor** | Rows marked confirmed with no resolvable Algorand txid |
+| **Off-hours** | High-value movements between midnight and 5am |
+| **Treasury drain** | Outflow overtaking inflow — the pool can no longer honour emergency lending |
+
+Every alert carries a severity, a 0-100 risk score, the **regulatory basis** (PMLA §12, RBI KYC Master Direction §42, FATF R.20, NABARD norms) and a triage state that survives re-scans.
+
+```bash
+curl -X POST http://127.0.0.1:3001/api/ai-monitor/scan
+curl http://127.0.0.1:3001/api/ai-monitor/alerts
+```
+
+**Show it live.** The demo ledger has two textbook patterns woven into its history, and *Simulate Threat* injects a fresh one and re-scans on the spot:
+
+```bash
+curl -X POST http://127.0.0.1:3001/api/ai-monitor/simulate-threat -H "Content-Type: application/json" -d "{\"pattern\":\"structuring\"}"
+```
+
+```
+[critical] risk 86  structuring     Possible structuring by Meera Patel
+    4 separate deposits totalling ₹37,600 inside 24h, each leg below the
+    ₹10,000 reporting threshold (₹9,400 + ₹9,400 + ₹9,400 + ₹9,400).
+```
+
+### Job 2 — never let the savings sit idle
+
+An SHG's pooled savings earning 0% is a real, measurable loss. The agent sizes the emergency-loan buffer first — because the group's core promise is same-day lending, and an 8% seven-year bond is worthless if a member can't get ₹5,000 for a hospital tonight — then allocates the rest across **Government of India instruments only**.
+
+| Instrument | Rate | Liquidity | Why this group |
+|---|---|---|---|
+| 91-Day Treasury Bill | 6.8% | Instant | Sovereign parking for the emergency buffer |
+| **Mahila Samman Savings Certificate** | 7.5% | 2 years | Women-only scheme — designed for exactly this saver |
+| RBI Floating Rate Savings Bond | 8.05% | 7 years | Highest sovereign coupon; resets with inflation |
+| National Savings Certificate | 7.7% | 5 years | Pledgeable at the linkage bank, so it still backs credit |
+| Sovereign Gold Bond | 2.5% + gold | 8 years | Replaces the physical gold rural households already buy |
+
+Plus Sukanya Samriddhi, POMIS, NABARD Rural Bonds and State Development Loans in the catalogue. No equities, no crypto, no private lending — sovereign and quasi-sovereign only.
+
+```bash
+curl http://127.0.0.1:3001/api/ai-monitor/investments
+```
+
+```
+₹88,279 is sitting idle and earning nothing. Holding ₹30,000 back so any member
+can still get an emergency loan the same day, the remaining ₹58,279 can go into
+government schemes at a blended 6.92% — about ₹4,025 a year, or ₹335 every month
+the group currently forgoes.
+```
+
+### Endpoints
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /api/ai-monitor/status` | Agent health, provider, open-alert counts by severity |
+| `POST /api/ai-monitor/scan` | Sweep the whole ledger and file findings |
+| `GET /api/ai-monitor/alerts` | Triage queue, ranked by risk score |
+| `POST /api/ai-monitor/alerts/:id/review` | Clear or escalate a finding |
+| `GET /api/ai-monitor/investments` | Idle-fund allocation across government schemes |
+| `POST /api/ai-monitor/ask` | Natural-language questions over the group's real figures |
+| `POST /api/ai-monitor/simulate-threat` | Inject a live pattern and re-scan (demo) |
+
+The agent also sweeps automatically every 5 minutes (`AI_MONITOR_INTERVAL_MS`) and screens each new transaction inline as it is written, so structuring is caught as it happens rather than in the next batch.
+
+**Where to see it:** Leader → *AI Insights*, or Bank → *Grant Approval*. Members get a read-only view under *AI Assistant*.
+
+---
+
+## 3. Excel reporting
+
+Every dataset downloads as a real `.xlsx` — typed dates, numeric currency cells, a frozen bold header and an autofilter — generated by a **zero-dependency writer** built on Node's `zlib` ([`services/xlsx.ts`](backend/src/services/xlsx.ts)). No SheetJS in the deployment.
+
+| Report | Sheets |
+|---|---|
+| `GET /api/reports/transactions.xlsx` | Transactions · Summary |
+| `GET /api/reports/full-ledger.xlsx` | Summary · Transactions · Members · Loans · Bank Disbursements · Compliance Alerts |
+| `GET /api/reports/members.xlsx` | Member register with trust scores and wallet addresses |
+| `GET /api/reports/loans.xlsx` | Loan book with approval state and AI recommendation |
+| `GET /api/reports/compliance.xlsx` | Agent findings with regulatory basis |
+
+Every report also serves `.csv` (UTF-8 BOM, so Excel reads ₹ and Devanagari names correctly). Filter transactions with `?memberId=`, `?type=`, `?status=`, `?limit=`.
+
+**In the UI:** Bank → *Audit Directory* → **Full Pack (.xlsx)**; Leader → **Export Excel**; Member → *Audit Logs* → **Excel** (their own statement only).
+
+---
+
+## 4. WhatsApp banking — exactly like SBI
 
 **Twilio only. Works on the Sandbox with no template approval.**
 
@@ -239,7 +346,7 @@ The in-browser simulator calls `/api/whatsapp/simulate`, which invokes **the sam
 
 ---
 
-## 3. Pera Wallet sign-in
+## 5. Pera Wallet sign-in — and real wallet settlement
 
 Saheli derives custodial accounts for members who cannot safeguard a seed phrase — that is the right trade-off for a rural SHG member, and it is documented under *Known limits*. But SHG leaders, bank officers and NGO auditors **can** hold their own keys, and they should not have to trust us with a password either.
 
@@ -277,7 +384,41 @@ Client                          Server                        Pera Wallet
 | `POST /api/auth/wallet/verify` | Exchange a signature for a JWT. Creates the account on first sign-in. |
 | `POST /api/auth/wallet/link` | Attach a wallet to an account that is already signed in (password → self-custody upgrade). |
 
-First signature for an address creates the account with the role selected on the sign-in screen. Returning wallets keep the profile they already have. Existing password users can link a wallet from the **Connect Pera** button in the top bar without losing their history.
+First signature for an address creates the account with the role selected on the sign-in screen. Returning wallets keep the profile they already have. Existing password users can link a wallet from the **profile menu** in the top bar without losing their history.
+
+### Real settlement — money genuinely leaving the wallet
+
+Sign-in is a signature. **Settlement is a payment**, and it follows the same trust model: the server builds the transaction, the wallet approves it, the server broadcasts it.
+
+```
+Client                            Server                        Pera Wallet
+  │  POST /algorand/payment/prepare  │                               │
+  │  { fromAddress, amountInr } ────>│  build unsigned payment,      │
+  │                                  │  check the payer can cover it │
+  │  <──── { unsignedTxn, txId } ────│                               │
+  │                                                                  │
+  │  signTransaction(unsignedTxn) ──────────────────────────────────>│
+  │  <───────────────────── signed blob ─────────────────────────────│
+  │                                  │                               │
+  │  POST /algorand/payment/submit   │                               │
+  │  { signedTxn } ─────────────────>│  broadcast → waitForConfirm   │
+  │                                  │  THEN write the ledger row    │
+  │  <──── { txId, round, ... } ─────│  and move the balances        │
+```
+
+Two things this buys:
+
+- **The client cannot forge a credit.** The receiver and amount are fixed server-side, and the ledger is only written *after* algod confirms the transfer. The database is never credited for money that did not move.
+- **The explorer link always resolves**, regardless of relayer funding.
+
+Rupees settle against a demo peg (`INR_TO_MICROALGO`, default ₹1 = 0.0001 ALGO), so a single 10-ALGO dispenser top-up covers ₹100,000 of demo movement.
+
+| Where | What it does |
+|---|---|
+| Member → *My Pera Wallet* | Deposit savings, repay a loan — debits the member's wallet |
+| Leader → *Settle a Payout On-Chain* | Pay a member — debits the leader's wallet, credits the member |
+
+`GET /api/algorand/balance/:address` returns the live on-chain balance, so the card shows what the wallet really holds rather than what the app believes.
 
 ### Verified behaviour
 
@@ -295,7 +436,7 @@ Set `VITE_ALGORAND_NETWORK` (frontend) to match `ALGORAND_NETWORK` (backend) —
 
 ---
 
-## 4. Algorand
+## 6. Algorand
 
 Every transaction id in this project is a **real 52-character Algorand txid**, and every explorer link resolves.
 
@@ -304,19 +445,36 @@ Every transaction id in this project is a **real 52-character Algorand txid**, a
 - **Atomic multi-sig.** Leader approvals are bundled into a single atomic group — all approvals land in one block or none do, so funds cannot move on a partial quorum.
 - **Note anchoring.** Ledger records are written as the note of a 0-amount payment: real, verifiable, needs no ASA opt-in, costs 0.001 ALGO.
 
-### Live vs simulated settlement — stated honestly
+### "I can't find my transaction on Lora" — read this
 
-The backend connects to Algorand TestNet on boot. If the relayer is funded it settles on chain; if not, it degrades to deterministic local settlement and **labels every response `mode: "simulated"`**. Nothing is ever presented as on-chain when it isn't.
+If a transaction id doesn't resolve on [Lora](https://lora.algokit.io/testnet), it is because **the relayer is unfunded**, not because anything is broken.
 
-To switch to live settlement, fund the relayer address shown at `/api/algorand/info` using the [TestNet dispenser](https://bank.testnet.algorand.network). No config change, no restart.
+The backend connects to TestNet on boot. If the relayer holds ALGO it broadcasts for real; if it holds nothing it cannot pay the 0.001 ALGO fee, so it falls back to deterministic local anchoring and labels the row `simulated`. The id is a well-formed 52-character base32 string, but it was never broadcast, so the explorer has nothing to show.
+
+**This has nothing to do with deployment.** You do *not* need to deploy the project to get transactions on TestNet — localhost talks to the same public network. There are exactly two ways to get explorer-resolvable ids:
+
+**Option A — fund the relayer (30 seconds, fixes everything globally)**
 
 ```bash
-curl http://127.0.0.1:3001/api/algorand/info
+curl -s http://127.0.0.1:3001/api/algorand/info
+```
+
+Copy `relayer.address`, paste it into the [TestNet dispenser](https://bank.testnet.algorand.network), and dispense. Every transaction from that moment settles on chain. No restart, no config change — the health cache re-probes within 30 seconds. The amber banner at the top of every dashboard turns green and shows the current round.
+
+**Option B — pay from your own Pera Wallet (works even with an unfunded relayer)**
+
+Any *Pay from Pera Wallet* button builds the payment server-side, has Pera sign it on your device, broadcasts it, and waits for confirmation before touching the ledger. Those ids are always real. Fund your own Pera TestNet account at the same dispenser.
+
+**Telling them apart in the UI:** every ledger row carries a badge — `on-chain` (green, the link resolves) or `local` (grey, it does not). Nothing is ever presented as on-chain when it isn't.
+
+```bash
+# Which mode am I in, and why?
+curl http://127.0.0.1:3001/api/algorand/health
 ```
 
 ---
 
-## 5. AlgoKit smart contracts
+## 7. AlgoKit smart contracts
 
 Algorand Python (`algopy`), compiled with `puyapy` 5.9 to **TEAL v11**. Compiled artifacts are committed so they can be verified without a Python toolchain.
 
@@ -335,7 +493,7 @@ See [`contracts/README.md`](contracts/README.md) to build and deploy.
 
 ---
 
-## 6. Dynamic Soulbound Tokens (d-SBT)
+## 8. Dynamic Soulbound Tokens (d-SBT)
 
 A static credit score tells a bank one number it has to trust. A d-SBT tells it the whole story.
 
@@ -370,31 +528,43 @@ Saheli/
 │       │   └── pricing.ts             price catalogue + revenue split
 │       ├── services/
 │       │   ├── algorand.ts            chain layer: accounts, anchoring, gasless
+│       │   ├── walletPayments.ts      ★ real Pera-signed settlement (prepare/submit)
+│       │   ├── aiMonitor.ts           ★ fraud typologies + government scheme advisor
+│       │   ├── openai.ts              LLM client, degrades to rules when absent
+│       │   ├── loanWorkflow.ts        ★ single-leader approval + treasury debit
+│       │   ├── xlsx.ts                zero-dependency Excel writer
 │       │   ├── whatsappBanking.ts     SBI-style state machine
 │       │   ├── dsbt.ts                soulbound passports
 │       │   ├── agentEngine.ts         autonomous treasury agent
-│       │   └── seed.ts                realistic demo SHG
+│       │   └── seed.ts                realistic demo SHG + planted AML patterns
 │       ├── routes/
-│       └── scripts/verify.ts        22-check end-to-end suite
+│       └── scripts/verify.ts        44-check end-to-end suite
 │
 └── app/                             React 19 + Vite + Tailwind
     └── src/components/
         ├── X402Console.tsx           the protocol, visualised
+        ├── AIAgentPanel.tsx          ★ fraud monitor · fund advisor · agent Q&A
+        ├── PeraPaymentButton.tsx     ★ prepare → sign → broadcast, three steps
+        ├── ChainStatusBanner.tsx     states honestly whether txids resolve
         └── WhatsAppDemo.tsx          drives the real state machine
 ```
 
 ---
 
-## Demo script for judges (5 minutes)
+## Demo script for judges (7 minutes)
 
-1. **Open `/health`** — Algorand round number and x402 config in one screenshot. Nothing to click.
-2. **Log in as Bank** → *x402 Pay-per-Use* → **"Request without paying"**. A real HTTP 402 with spec-exact `PaymentRequirements`.
-3. **"Pay $0.25 and unlock"** — watch the five protocol steps, then the credit report with an actual lending decision.
-4. Scroll to **revenue** — that $0.20 went to the SHG treasury. *This is how the women get paid for their own data.*
-5. **Open the WhatsApp assistant** → send `Hi` → `1234` → tap the 🎙️ voice sample *"I need 5000 rupees urgently for hospital"* → `YES`. Emergency loan approved by the AI agent against the on-chain trust score, with a QR proof and a live explorer link.
-6. **Sign out → "Connect Pera Wallet"** — scan with the Pera app, approve one signature, and you are in. No password was ever created; the server only ever saw a signature.
-7. **Audit Logs** — every transaction with its full 52-character Algorand txid, each one a live explorer link.
-8. **`cd backend && npm run verify`** — 29/29, live, in front of them.
+**Before you start:** fund the relayer at the [TestNet dispenser](https://bank.testnet.algorand.network) using the address from `/api/algorand/info`. Takes 30 seconds and turns every explorer link live.
+
+1. **Open `/health`** — Algorand round number, x402 config and AI agent status in one screenshot. Nothing to click.
+2. **Log in as Bank** → *x402 Pay-per-Use* → **"Request without paying"**. A real HTTP 402 with spec-exact `PaymentRequirements`. Then **"Pay $0.25 and unlock"** — five protocol steps, then a credit report with an actual lending decision.
+3. Scroll to **revenue** — that $0.20 went to the SHG treasury. *This is how the women get paid for their own data.*
+4. **Bank → Audit Directory** — 90+ anchored movements, every txid a live explorer link. Hit **Full Pack (.xlsx)** and open the six-sheet workbook in Excel in front of them.
+5. **Leader → AI Insights → Fraud Monitor.** Two findings are already there: a `critical` structuring pattern and a `high` round-trip, each with its regulatory basis. Now hit **Simulate Threat** — the agent catches a brand-new laundering pattern within one sweep, live.
+6. **Switch to *Idle Fund Advisor*** — the agent has allocated the group's idle savings across Mahila Samman Savings Certificate, T-Bills and RBI Floating Rate Bonds, and tells them exactly how many rupees a month idleness is costing.
+7. **Leader → Treasury.** Note the liquidity figure, approve a pending loan with **one click**, watch the treasury drop by exactly that amount. Decline another — the rest of the queue is untouched.
+8. **Member → My Pera Wallet → Pay from Pera Wallet.** Approve on the phone. Real ALGO leaves the wallet, the balance drops, and the resulting txid opens on Lora.
+9. **Open the WhatsApp assistant** → `Hi` → `1234` → 🎙️ *"I need 5000 rupees urgently for hospital"* → `YES`. Emergency loan evaluated against the on-chain trust score, with a QR proof.
+10. **`cd backend && npm run verify`** — 44/44, live, in front of them.
 
 ---
 
@@ -408,11 +578,13 @@ cp backend/.env.example backend/.env
 
 | Variable | Effect if unset |
 |---|---|
-| `MONGODB_URI` | In-process database starts automatically |
+| `MONGODB_URI` | In-process database starts automatically — **and is wiped on every restart** |
 | `ALGORAND_RELAYER_MNEMONIC` | Deterministic derived relayer; fund it to go live |
+| `INR_TO_MICROALGO` | ₹1 settles as 100 microAlgos in Pera-signed payments |
 | `X402_FACILITATOR_URL` | Built-in local facilitator (no external dependency) |
 | `TWILIO_*` | Browser simulator still works; live WhatsApp disabled |
-| `OPENAI_API_KEY` | Voice transcription disabled; text and menus unaffected |
+| `OPENAI_API_KEY` | **AI agent still detects fraud and allocates funds** using its rule engine; LLM reasoning, narratives and Q&A are disabled, and voice transcription is off |
+| `AI_MONITOR_INTERVAL_MS` | Agent sweeps the full ledger every 5 minutes |
 | `SARVAM_API_KEY` | Falls back to LibreTranslate, then passthrough |
 | `JWT_SECRET` | Falls back to a public default — **must be set in production** |
 | `WALLET_CHALLENGE_TTL_MS` | Pera sign-in challenges expire after 5 minutes |
@@ -464,10 +636,13 @@ NODE_ENV=production
 
 - [ ] `JWT_SECRET` set to something long and random
 - [ ] `CORS_ORIGINS` set to the deployed frontend origin
-- [ ] `MONGODB_URI` pointing at Atlas, with the host's IP allowed
+- [ ] **`MONGODB_URI` pointing at Atlas**, with the host's IP allowed — without it the API falls back to an in-process database that is **wiped on every restart**, which on a free host means every cold start
 - [ ] `VITE_API_BASE_URL` baked in at build time (Vite inlines it — setting it at runtime does nothing)
 - [ ] `VITE_ALGORAND_NETWORK` matches the backend's `ALGORAND_NETWORK`
 - [ ] `PUBLIC_BASE_URL` set to the public HTTPS URL, so QR proofs carry scannable links
+- [ ] `ALGORAND_RELAYER_MNEMONIC` set to a **funded** account, or fund the derived one from `/api/algorand/info` — otherwise every txid is `simulated` and no explorer link resolves
+- [ ] `OPENAI_API_KEY` set if you want the agent to reason rather than fall back to its rule engine
+- [ ] Seed once after deploying: `curl -X POST https://your-api/api/auth/seed-demo -d '{"reset":true}'`
 - [ ] `npm run verify -- --url https://your-api.onrender.com` passes against the deployed API
 
 ## Scripts
@@ -477,7 +652,7 @@ NODE_ENV=production
 | Command | Purpose |
 |---|---|
 | `npm run dev` | Start backend with auto-reload |
-| `npm run verify` | 29-check end-to-end suite (backend must be running) |
+| `npm run verify` | 44-check end-to-end suite (backend must be running) |
 | `npm run typecheck` | Strict TypeScript, zero errors |
 | `npm run build` | Compile to `dist/` |
 | `npm start` | Run the compiled build |
@@ -502,4 +677,6 @@ Stated plainly, because a judge will find them anyway:
 - **Settlement mode.** Live on-chain settlement needs a funded relayer. Unfunded, the API says `simulated` — never anything stronger.
 - **Contracts compile but are not deployed.** TEAL is committed and verifiable; deploying needs a funded TestNet account (`algokit project deploy`). The backend anchors to chain regardless.
 - **DeFi yield is modelled.** Folks Finance / Tinyman APYs drive a simulation; live pool integration is the next step, not a claim we make.
+- **Government scheme rates are indicative.** The allocator uses published small-savings and RBI rates and says so on every response. Actually subscribing to NSC or MSSC happens at a post office, not over an API — Saheli produces the instruction, not the execution.
+- **The demo ledger contains two planted AML patterns.** They are labelled `red-team pattern` in their descriptions. They exist so the fraud detector has something real to find; the agent is given no hint they are there and catches them with the same rules it runs against genuine activity.
 - **Demo MPIN is `1234`** for every seeded account.

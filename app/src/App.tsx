@@ -20,6 +20,7 @@ import ContactSection from './sections/ContactSection';
 import WhatsAppDemo from './components/WhatsAppDemo';
 import X402Console from './components/X402Console';
 import AutoTranslate from './components/AutoTranslate';
+import ChainStatusBanner from './components/ChainStatusBanner';
 import { useAuth } from './contexts/AuthContext';
 
 gsap.registerPlugin(ScrollTrigger);
@@ -135,6 +136,7 @@ function App() {
           onOpenAIAssistant={() => setShowWhatsAppDemo(true)}
           onSignOut={handleSignOut}
           onSectionSearch={handleSectionSearch}
+          onOpenSettings={() => setActiveSection('settings')}
         />
         <Sidebar
           currentRole={safeRole}
@@ -142,6 +144,9 @@ function App() {
           onSectionChange={setActiveSection}
         />
         <main className="lg:ml-64 pt-16 min-h-screen">
+          {/* States plainly whether transaction ids resolve on the explorer,
+              and how to switch to live settlement in one step. */}
+          <ChainStatusBanner />
           {activeSection === 'x402' && (
             <div className="p-6 max-w-6xl mx-auto">
               <X402Console />

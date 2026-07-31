@@ -1,13 +1,12 @@
 import { Router, Request, Response } from 'express';
-import { v4 as uuidv4 } from 'uuid';
 import mongoose from 'mongoose';
 import User from '../models/User';
 import Transaction from '../models/Transaction';
 import LoanModel from '../models/Loan';
-import MultiSigActionModel from '../models/MultiSigAction';
 import { registerTransactionLifecycle, setTransactionLifecycleStatus } from '../services/txEngine';
 import { anchorLedgerEntry } from '../services/algorand';
 import { processEmergencyLoan, getAgentStatus } from '../services/agentEngine';
+import { LEADER_APPROVALS_REQUIRED, openLoanApproval } from '../services/loanWorkflow';
 
 const router = Router();
 
@@ -160,6 +159,7 @@ async function saveMemberTransaction(params: {
     description: params.description,
     transactionId,
     status: 'pending',
+    settlementMode: anchor?.mode ?? 'simulated',
     agentProcessed: params.agentProcessed ?? true,
   });
 
@@ -287,22 +287,15 @@ async function buildAgentResponse(
             aiRecommendation: trustScore >= 700 ? 'approve' : 'review',
             aiReason: agentResult.reason,
             approvals: 0,
-            approvalsRequired: agentResult.threshold,
+            approvalsRequired: LEADER_APPROVALS_REQUIRED,
             repaidAmount: 0,
           });
 
-          await MultiSigActionModel.create({
-            id: uuidv4(),
-            type: 'loan_approval',
-            description: `Loan approval for ${effectiveName}`,
+          await openLoanApproval({
+            loanId: String(loan._id),
+            memberName: effectiveName,
             amount: amt,
-            requestedBy: effectiveName,
-            signatures: [],
-            signaturesRequired: agentResult.threshold,
-            status: 'pending',
-            linkedLoanId: String(loan._id),
-            destinationRole: 'leader',
-            createdAt: new Date().toISOString(),
+            isEmergency: /medical|hospital|emergency|health|accident|urgent/i.test(intent.purpose || ''),
           });
         }
       }
@@ -319,7 +312,7 @@ async function buildAgentResponse(
       }
 
       return {
-        reply: `Loan request received.\n\nAmount: ₹${amt.toLocaleString('en-IN')}\nPurpose: ${intent.purpose || 'General use'}\n\nTrust score evaluated: ${trustScore}/1000\nRouting to ${agentResult.threshold}-of-3 leader approval.\n\nYou will get an update after review.`,
+        reply: `Loan request received.\n\nAmount: ₹${amt.toLocaleString('en-IN')}\nPurpose: ${intent.purpose || 'General use'}\n\nTrust score evaluated: ${trustScore}/1000\nRouting to a single SHG leader approval.\n\nYou will get an update after review.`,
         action: 'loan_pending_approval',
         amount: amt,
       };

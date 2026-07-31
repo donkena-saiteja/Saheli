@@ -12,6 +12,7 @@
  */
 
 import { PeraWalletConnect } from '@perawallet/connect';
+import algosdk from 'algosdk';
 
 /** Algorand chain ids Pera understands. */
 const CHAIN_IDS = {
@@ -148,6 +149,30 @@ export async function signChallenge(message: string, address: string): Promise<s
   return toBase64(signature);
 }
 
+/**
+ * Signs a server-built payment and returns the signed blob as base64.
+ *
+ * This is the path that makes money genuinely leave the wallet: the server
+ * constructs the transaction (so the receiver and amount cannot be tampered
+ * with client-side), Pera asks the user to approve it on their device, and the
+ * server broadcasts the result. The txid it produces resolves on Lora.
+ */
+export async function signPayment(unsignedTxnBase64: string, signerAddress: string): Promise<string> {
+  const pera = getPeraWallet();
+  const txnBytes = fromBase64(unsignedTxnBase64);
+
+  // Pera's signer takes a decoded algosdk Transaction, not raw bytes.
+  const txn = algosdk.decodeUnsignedTransaction(txnBytes);
+  const signed = await pera.signTransaction([[{ txn, signers: [signerAddress] }]]);
+
+  const blob = signed?.[0];
+  if (!blob || blob.length === 0) {
+    throw new Error('Pera Wallet returned an empty signature.');
+  }
+
+  return toBase64(blob);
+}
+
 /** Base64 without depending on a Node Buffer polyfill in the browser. */
 function toBase64(bytes: Uint8Array): string {
   let binary = '';
@@ -155,4 +180,13 @@ function toBase64(bytes: Uint8Array): string {
     binary += String.fromCharCode(bytes[i]);
   }
   return btoa(binary);
+}
+
+function fromBase64(value: string): Uint8Array {
+  const binary = atob(value);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i += 1) {
+    bytes[i] = binary.charCodeAt(i);
+  }
+  return bytes;
 }

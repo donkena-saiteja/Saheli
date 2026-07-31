@@ -32,6 +32,18 @@ function hasNoTranslateMarker(el: HTMLElement | null): boolean {
   return false;
 }
 
+/**
+ * What we know about one text node.
+ *
+ * `source` is the English original we translate from; `applied` is the exact
+ * string this component last wrote into the DOM. Keeping both is what lets us
+ * tell our own writes apart from React's — see `syncNodeState`.
+ */
+interface NodeState {
+  source: string;
+  applied: string;
+}
+
 async function sarvamBatchTranslate(texts: string[], targetCode: string): Promise<Map<string, string>> {
   const result = new Map<string, string>();
   if (!texts.length) {
@@ -75,8 +87,8 @@ export default function AutoTranslate() {
   const { language } = useLanguage();
   const targetCode = languageMeta[language].code;
 
-  const textOriginalRef = useRef(new WeakMap<Text, string>());
-  const attrOriginalRef = useRef(new WeakMap<HTMLElement, Record<string, string>>());
+  const textStateRef = useRef(new WeakMap<Text, NodeState>());
+  const attrStateRef = useRef(new WeakMap<HTMLElement, Record<string, NodeState>>());
   const cacheRef = useRef<Map<string, string>>(new Map());
   const pendingKeysRef = useRef<Set<string>>(new Set());
   const applyingRef = useRef(false);
@@ -97,6 +109,30 @@ export default function AutoTranslate() {
     }
 
     let cancelled = false;
+    // Declared up front so `applyTranslations` can drain the observer's queue of
+    // its own writes before re-enabling it.
+    let observer: MutationObserver | null = null;
+
+    /**
+     * Reconciles what we last wrote with what is in the DOM now.
+     *
+     * The previous implementation cached the first text it ever saw in a node
+     * and unconditionally restored it, so any React re-render was silently
+     * reverted — which is why the sign-in role badge stayed on "Member" no
+     * matter which role you picked. If the current text differs from what we
+     * applied, the application changed it and that new text becomes the source
+     * of truth.
+     */
+    const syncNodeState = (current: string, state: NodeState | undefined): NodeState => {
+      if (!state) {
+        return { source: current, applied: current };
+      }
+      if (current !== state.applied) {
+        state.source = current;
+        state.applied = current;
+      }
+      return state;
+    };
 
     const collectTextNodes = (): Text[] => {
       const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
@@ -114,12 +150,10 @@ export default function AutoTranslate() {
           continue;
         }
 
-        const source = textOriginalRef.current.get(node) ?? node.textContent ?? '';
-        if (!textOriginalRef.current.has(node)) {
-          textOriginalRef.current.set(node, source);
-        }
+        const state = syncNodeState(node.textContent ?? '', textStateRef.current.get(node));
+        textStateRef.current.set(node, state);
 
-        if (shouldTranslateText(source)) {
+        if (shouldTranslateText(state.source)) {
           nodes.push(node);
         }
         current = walker.nextNode();
@@ -127,30 +161,32 @@ export default function AutoTranslate() {
       return nodes;
     };
 
-    const collectAttrNodes = (): Array<{ el: HTMLElement; attr: string; source: string }> => {
+    const collectAttrNodes = (): Array<{ el: HTMLElement; attr: string; state: NodeState }> => {
       const attrs = ['placeholder', 'title', 'aria-label'];
-      const result: Array<{ el: HTMLElement; attr: string; source: string }> = [];
+      const result: Array<{ el: HTMLElement; attr: string; state: NodeState }> = [];
 
-      const all = Array.from(document.querySelectorAll<HTMLElement>('input, textarea, button, [title], [aria-label]'));
+      const all = Array.from(
+        document.querySelectorAll<HTMLElement>('input, textarea, button, [title], [aria-label]'),
+      );
       for (const el of all) {
         if (hasNoTranslateMarker(el)) continue;
         if (EXCLUDED_TAGS.has(el.tagName)) continue;
 
-        let originalMap = attrOriginalRef.current.get(el);
-        if (!originalMap) {
-          originalMap = {};
-          attrOriginalRef.current.set(el, originalMap);
+        let stateMap = attrStateRef.current.get(el);
+        if (!stateMap) {
+          stateMap = {};
+          attrStateRef.current.set(el, stateMap);
         }
 
         for (const attr of attrs) {
           const current = el.getAttribute(attr);
           if (!current) continue;
-          if (!(attr in originalMap)) {
-            originalMap[attr] = current;
-          }
-          const source = originalMap[attr];
-          if (shouldTranslateText(source)) {
-            result.push({ el, attr, source });
+
+          const state = syncNodeState(current, stateMap[attr]);
+          stateMap[attr] = state;
+
+          if (shouldTranslateText(state.source)) {
+            result.push({ el, attr, state });
           }
         }
       }
@@ -158,32 +194,45 @@ export default function AutoTranslate() {
       return result;
     };
 
+    /** Writes text without letting the observer treat it as an app-side change. */
+    const write = (apply: () => void) => {
+      applyingRef.current = true;
+      apply();
+      // Discard the records our own writes just generated, otherwise the
+      // observer re-fires immediately and we translate our own output.
+      observer?.takeRecords();
+      applyingRef.current = false;
+    };
+
     const applyTranslations = async () => {
       const textNodes = collectTextNodes();
       const attrNodes = collectAttrNodes();
 
       if (language === 'English') {
-        for (const node of textNodes) {
-          const source = textOriginalRef.current.get(node);
-          if (typeof source === 'string' && node.textContent !== source) {
-            node.textContent = source;
+        write(() => {
+          for (const node of textNodes) {
+            const state = textStateRef.current.get(node);
+            if (state && node.textContent !== state.source) {
+              node.textContent = state.source;
+              state.applied = state.source;
+            }
           }
-        }
-        for (const { el, attr } of attrNodes) {
-          const original = attrOriginalRef.current.get(el)?.[attr];
-          if (original && el.getAttribute(attr) !== original) {
-            el.setAttribute(attr, original);
+          for (const { el, attr, state } of attrNodes) {
+            if (el.getAttribute(attr) !== state.source) {
+              el.setAttribute(attr, state.source);
+              state.applied = state.source;
+            }
           }
-        }
+        });
         return;
       }
 
       const uniqueSources = new Set<string>();
       textNodes.forEach((node) => {
-        const source = textOriginalRef.current.get(node);
-        if (source) uniqueSources.add(source);
+        const state = textStateRef.current.get(node);
+        if (state?.source) uniqueSources.add(state.source);
       });
-      attrNodes.forEach(({ source }) => uniqueSources.add(source));
+      attrNodes.forEach(({ state }) => uniqueSources.add(state.source));
 
       const translatedBySource = new Map<string, string>();
       const uncached = [...uniqueSources].filter((source) => {
@@ -211,23 +260,30 @@ export default function AutoTranslate() {
 
       if (cancelled) return;
 
-      applyingRef.current = true;
-      for (const node of textNodes) {
-        const source = textOriginalRef.current.get(node);
-        if (!source) continue;
-        const translated = translatedBySource.get(source) || source;
-        if (node.textContent !== translated) {
-          node.textContent = translated;
-        }
-      }
+      write(() => {
+        for (const node of textNodes) {
+          const state = textStateRef.current.get(node);
+          if (!state?.source) continue;
+          // Re-read: an async translation round-trip gives React time to render
+          // something new into this node, and that must win over a stale result.
+          if (node.textContent !== state.applied) continue;
 
-      for (const { el, attr, source } of attrNodes) {
-        const translated = translatedBySource.get(source) || source;
-        if (el.getAttribute(attr) !== translated) {
-          el.setAttribute(attr, translated);
+          const translated = translatedBySource.get(state.source) || state.source;
+          if (node.textContent !== translated) {
+            node.textContent = translated;
+            state.applied = translated;
+          }
         }
-      }
-      applyingRef.current = false;
+
+        for (const { el, attr, state } of attrNodes) {
+          if (el.getAttribute(attr) !== state.applied) continue;
+          const translated = translatedBySource.get(state.source) || state.source;
+          if (el.getAttribute(attr) !== translated) {
+            el.setAttribute(attr, translated);
+            state.applied = translated;
+          }
+        }
+      });
     };
 
     const scheduleApply = () => {
@@ -239,18 +295,18 @@ export default function AutoTranslate() {
         if (applyingRef.current) {
           return;
         }
-      if (rafRef.current !== null) {
-        cancelAnimationFrame(rafRef.current);
-      }
-      rafRef.current = requestAnimationFrame(() => {
-        void applyTranslations();
-      });
+        if (rafRef.current !== null) {
+          cancelAnimationFrame(rafRef.current);
+        }
+        rafRef.current = requestAnimationFrame(() => {
+          void applyTranslations();
+        });
       }, 120);
     };
 
     scheduleApply();
 
-    const observer = new MutationObserver(() => {
+    observer = new MutationObserver(() => {
       if (applyingRef.current) {
         return;
       }
@@ -267,7 +323,8 @@ export default function AutoTranslate() {
 
     return () => {
       cancelled = true;
-      observer.disconnect();
+      observer?.disconnect();
+      observer = null;
       if (rafRef.current !== null) {
         cancelAnimationFrame(rafRef.current);
       }

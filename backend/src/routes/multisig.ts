@@ -4,20 +4,28 @@ import { registerTransactionLifecycle } from '../services/txEngine';
 import { submitAtomicApproval, explorerTxUrl } from '../services/algorand';
 import MultiSigActionModel from '../models/MultiSigAction';
 import LoanModel from '../models/Loan';
-import { queueBankDisbursement } from '../services/bankDisbursementService';
+import { LEADER_APPROVALS_REQUIRED, declineLoan, settleApprovedLoan } from '../services/loanWorkflow';
 
 const router = Router();
 
 function mapDocToAction(doc: any) {
+  const signatures = doc.signatures || [];
+  const required = doc.signaturesRequired || LEADER_APPROVALS_REQUIRED;
+
   return {
     id: doc.id,
     type: doc.type,
     description: doc.description,
     amount: doc.amount,
     requestedBy: doc.requestedBy,
-    signatures: doc.signatures || [],
-    signaturesRequired: doc.signaturesRequired,
+    signatures,
+    signaturesRequired: required,
+    /** Convenience for the UI so it never has to recompute the ratio. */
+    approvalProgress: Math.min(1, signatures.length / Math.max(1, required)),
     status: doc.status,
+    isEmergency: Boolean(doc.isEmergency),
+    linkedLoanId: doc.linkedLoanId,
+    destinationRole: doc.destinationRole || 'leader',
     createdAt: doc.createdAt,
     transactionId: doc.transactionId,
     explorerUrl: doc.transactionId ? explorerTxUrl(doc.transactionId) : undefined,
@@ -25,15 +33,22 @@ function mapDocToAction(doc: any) {
   };
 }
 
-// GET /api/multisig/pending
-router.get('/pending', async (_req: Request, res: Response) => {
-  const pending = await MultiSigActionModel.find({ status: 'pending' }).sort({ createdAt: -1 }).lean();
+// GET /api/multisig/pending?destinationRole=leader
+router.get('/pending', async (req: Request, res: Response) => {
+  const filter: Record<string, unknown> = { status: 'pending' };
+  if (req.query.destinationRole) filter.destinationRole = String(req.query.destinationRole);
+
+  const pending = await MultiSigActionModel.find(filter).sort({ createdAt: -1 }).lean();
   res.json({ success: true, data: pending.map(mapDocToAction) });
 });
 
 // GET /api/multisig
-router.get('/', async (_req: Request, res: Response) => {
-  const actions = await MultiSigActionModel.find().sort({ createdAt: -1 }).lean();
+router.get('/', async (req: Request, res: Response) => {
+  const filter: Record<string, unknown> = {};
+  if (req.query.status) filter.status = String(req.query.status);
+  if (req.query.destinationRole) filter.destinationRole = String(req.query.destinationRole);
+
+  const actions = await MultiSigActionModel.find(filter).sort({ createdAt: -1 }).lean();
   res.json({ success: true, data: actions.map(mapDocToAction) });
 });
 
@@ -55,14 +70,19 @@ router.post('/:id/sign', async (req: Request, res: Response) => {
     action.signatures.push(signerId);
   }
 
-  let message = `Approval ${action.signatures.length}/${action.signaturesRequired} recorded.`;
+  // A leader signing twice must not deadlock the action. Signatures are
+  // de-duplicated by signer, so the threshold is enforced against distinct
+  // signers and a single-leader SHG can always reach it.
+  const required = Math.max(1, action.signaturesRequired || LEADER_APPROVALS_REQUIRED);
+  let message = `Approval ${action.signatures.length}/${required} recorded.`;
+  let settlement = null;
 
-  if (action.signatures.length >= action.signaturesRequired) {
+  if (action.signatures.length >= required) {
     action.status = 'executed';
 
-    // Joint-account emulation: every leader's approval is bundled into ONE
-    // Algorand atomic group. Either all approvals commit in the same block or
-    // none do, so funds can never move on a partial quorum.
+    // Every approving signature is bundled into ONE Algorand atomic group:
+    // either all of them commit in the same block or none do, so funds can
+    // never move on a partial quorum.
     const atomic = await submitAtomicApproval({
       approverSubjects: action.signatures.map((s: string) => `leader:${s}`),
       shgId: 'shg1',
@@ -79,27 +99,20 @@ router.post('/:id/sign', async (req: Request, res: Response) => {
       initialStatus: atomic.mode === 'live' ? 'confirmed' : 'pending',
       autoConfirm: atomic.mode !== 'live',
     });
-    message =
-      `Threshold reached. ${atomic.approvals} approvals committed as a single Algorand atomic group. ` +
-      `Ref: ${atomic.txId.slice(0, 12)}...`;
+
+    message = `Approved. Committed as an Algorand atomic group (${atomic.approvals} signature${
+      atomic.approvals === 1 ? '' : 's'
+    }). Ref: ${atomic.txId.slice(0, 12)}…`;
 
     if (action.type === 'loan_approval' && action.linkedLoanId) {
-      const loan = await LoanModel.findById(action.linkedLoanId);
-      if (loan) {
-        loan.approvals = action.signatures.length;
-        loan.approvalsRequired = action.signaturesRequired;
-        loan.status = 'approved';
-        await loan.save();
-
-        await queueBankDisbursement({
-          loanId: String(loan._id),
-          userId: String(loan.user),
-          amount: loan.amount,
-          notes: 'Leader approvals completed; sent to bank for payout',
-          autoProcess: true,
-        });
-
-        message = 'Leader threshold reached. Loan forwarded to bank for payout processing.';
+      const loan = await LoanModel.findById(action.linkedLoanId).catch(() => null);
+      if (loan && loan.status === 'pending') {
+        // Same settlement path the loans router uses, so the treasury is
+        // debited identically whichever panel the leader approved from.
+        settlement = await settleApprovedLoan(String(loan._id), signerId);
+        message =
+          `Loan approved and settled. ₹${loan.amount.toLocaleString('en-IN')} left the SHG treasury ` +
+          `(balance now ₹${settlement.treasuryBalanceAfter.toLocaleString('en-IN')}).`;
       }
     }
   }
@@ -108,11 +121,11 @@ router.post('/:id/sign', async (req: Request, res: Response) => {
 
   res.json({
     success: true,
-    data: { action: mapDocToAction(action), message },
+    data: { action: mapDocToAction(action), settlement, message },
   });
 });
 
-// POST /api/multisig/:id/reject
+// POST /api/multisig/:id/reject — rejects THIS action only
 router.post('/:id/reject', async (req: Request, res: Response) => {
   const action = await MultiSigActionModel.findOne({ id: req.params.id });
   if (!action) {
@@ -120,17 +133,46 @@ router.post('/:id/reject', async (req: Request, res: Response) => {
     return;
   }
 
+  if (action.status !== 'pending') {
+    res.status(400).json({ success: false, error: `Action is already ${action.status}` });
+    return;
+  }
+
   action.status = 'rejected';
   await action.save();
+
+  // Reject the loan this approval belongs to — and nothing else. Scoped by the
+  // action's own linkedLoanId so one decline can never touch another request.
+  let loanDeclined: string | null = null;
+  if (action.type === 'loan_approval' && action.linkedLoanId) {
+    const result = await declineLoan({
+      loanId: action.linkedLoanId,
+      reason: req.body?.reason,
+      declinedBy: req.body?.declinedBy || 'SHG Leader',
+    }).catch(() => null);
+    loanDeclined = result?.loanId || null;
+  }
+
+  const remainingPending = await MultiSigActionModel.countDocuments({ status: 'pending' });
+
   res.json({
     success: true,
-    data: { action: mapDocToAction(action), message: 'Action rejected by leader.' },
+    data: {
+      action: mapDocToAction(action),
+      loanDeclined,
+      remainingPending,
+      message:
+        `Declined "${action.description}". ${remainingPending} other approval${
+          remainingPending === 1 ? '' : 's'
+        } still pending and unaffected.`,
+    },
   });
 });
 
 // POST /api/multisig (create new action)
 router.post('/', async (req: Request, res: Response) => {
-  const { type, description, amount, requestedBy, signaturesRequired, linkedLoanId, destinationRole } = req.body;
+  const { type, description, amount, requestedBy, signaturesRequired, linkedLoanId, destinationRole, isEmergency } =
+    req.body;
 
   const created = await MultiSigActionModel.create({
     id: uuidv4(),
@@ -139,8 +181,9 @@ router.post('/', async (req: Request, res: Response) => {
     amount: amount || 0,
     requestedBy: requestedBy || 'AI Agent',
     signatures: [],
-    signaturesRequired: signaturesRequired || 3,
+    signaturesRequired: Math.max(1, Number(signaturesRequired) || LEADER_APPROVALS_REQUIRED),
     status: 'pending',
+    isEmergency: Boolean(isEmergency),
     createdAt: new Date().toISOString(),
     linkedLoanId,
     destinationRole: destinationRole || 'leader',

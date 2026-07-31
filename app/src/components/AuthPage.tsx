@@ -216,10 +216,19 @@ export default function AuthPage({ onSuccess }: AuthPageProps) {
               ))}
             </div>
 
-            {/* Role Badge */}
-            <div className={`inline-flex items-center gap-2 ${selectedRole.bg} ${selectedRole.text} ${selectedRole.border} border rounded-full px-3 py-1.5 mb-6`}>
+            {/* Role Badge — mirrors the role selected on the left.
+                `key` forces a fresh node per role and `data-no-auto-translate`
+                keeps the DOM-rewriting translator away from it, so the label can
+                never get stuck on a previously rendered role. */}
+            <div
+              key={selectedRole.id}
+              data-no-auto-translate="true"
+              className={`inline-flex items-center gap-2 ${selectedRole.bg} ${selectedRole.text} ${selectedRole.border} border rounded-full px-3 py-1.5 mb-6`}
+            >
               <Icon className="w-3.5 h-3.5" />
-              <span className="text-xs font-bold">{selectedRole.label}</span>
+              <span className="text-xs font-bold">
+                {mode === 'login' ? 'Signing in as' : 'Signing up as'} {selectedRole.label}
+              </span>
             </div>
 
             <form onSubmit={handleSubmit} className="space-y-4">

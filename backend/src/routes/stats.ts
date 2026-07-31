@@ -164,6 +164,7 @@ router.post('/grants/approve', async (_req: Request, res: Response) => {
     description: 'Institutional grant approved and disbursed',
     transactionId: txId,
     status: 'pending',
+    settlementMode: grantAnchor.mode,
     agentProcessed: false,
   });
 

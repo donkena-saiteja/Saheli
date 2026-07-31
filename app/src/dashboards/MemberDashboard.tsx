@@ -21,16 +21,23 @@ import {
   Bell,
   MessageSquare,
   Save,
+  FileSpreadsheet,
+  Loader2,
+  Wallet,
+  ExternalLink,
 } from 'lucide-react';
 import React, { useEffect, useRef, useState } from 'react';
 import { gsap } from 'gsap';
-import { useApiFetch } from '../hooks/useApi';
-import { membersApi, qrApi, agentApi } from '../lib/api';
+import { useApiFetch, useApiPolling } from '../hooks/useApi';
+import { membersApi, qrApi, agentApi, reportsApi, algorandApi } from '../lib/api';
 import QRCodeDisplay from '../components/QRCodeDisplay';
 import LoanRequestModal from '../components/LoanRequestModal';
+import AIAgentPanel from '../components/AIAgentPanel';
+import PeraPaymentButton from '../components/PeraPaymentButton';
 import { toast } from 'sonner';
 import { useAuth } from '../contexts/AuthContext';
 import { useLanguage } from '../contexts/LanguageContext';
+import { shortenAddress } from '../lib/pera';
 
 // Skeleton loader
 const Skeleton = ({ className = '' }: { className?: string }) => (
@@ -89,9 +96,13 @@ export default function MemberDashboard({ activeSection = 'passport', onOpenAIAs
   });
   const [auditQuery, setAuditQuery] = useState('');
 
-  const { user } = useAuth();
+  const [exporting, setExporting] = useState(false);
+  const [depositAmount, setDepositAmount] = useState('500');
+
+  const { user, walletAddress } = useAuth();
   const { language, setLanguage, t, languages, getLanguageLabel } = useLanguage();
   const memberId = user?._id || 'm1'; // fallback to m1 only if no user (shouldn't happen)
+  const linkedWallet = user?.walletAddress || walletAddress;
 
   useEffect(() => {
     const saved = loadMemberSettings(memberId);
@@ -107,12 +118,39 @@ export default function MemberDashboard({ activeSection = 'passport', onOpenAIAs
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [memberId]);
 
-  const { data: rawMember, loading, error } = useApiFetch(() => membersApi.getById(memberId));
-  const { data: repayments } = useApiFetch(() => agentApi.getRepayments());
-  const { data: memberTransactions, loading: transactionsLoading } = useApiFetch(
-    () => membersApi.getTransactions(memberId),
+  const { data: rawMember, loading, error, refetch: refetchMember } = useApiFetch(
+    () => membersApi.getById(memberId),
     [memberId],
   );
+  const { data: repayments } = useApiFetch(() => agentApi.getRepayments());
+  const {
+    data: memberTransactions,
+    loading: transactionsLoading,
+    refetch: refetchTransactions,
+  } = useApiPolling(() => membersApi.getTransactions(memberId), 10000, [memberId]);
+
+  // Live on-chain balance of the connected wallet — what it actually holds,
+  // not what the app's ledger thinks.
+  const { data: walletBalance, refetch: refetchWalletBalance } = useApiPolling(
+    () => (linkedWallet ? algorandApi.getBalance(linkedWallet) : Promise.resolve(null)),
+    20000,
+    [linkedWallet],
+  );
+
+  const handleExportStatement = async () => {
+    setExporting(true);
+    try {
+      const result = await reportsApi.download('transactions', 'xlsx', { memberId });
+      toast.success(`Downloaded ${result.filename} (${Math.round(result.bytes / 1024)} KB)`);
+    } catch (err) {
+      toast.error((err as Error).message || 'Export failed');
+    }
+    setExporting(false);
+  };
+
+  const refreshAfterPayment = async () => {
+    await Promise.all([refetchMember(), refetchTransactions(), refetchWalletBalance()]);
+  };
 
   // If it's a real MongoDB user newly registered, they might lack these fields from mockData
   const member = React.useMemo(() => {
@@ -223,12 +261,9 @@ export default function MemberDashboard({ activeSection = 'passport', onOpenAIAs
           </div>
         </div>
 
-        <div className="bg-gradient-to-br from-navy to-navy-light text-white rounded-2xl p-6 border border-border/50">
-          <h3 className="font-bold mb-3">Agent Status</h3>
-          <p className="text-sm text-white/75">
-            AI loan evaluator and repayment scheduler are active. Notifications are synced from database events and WhatsApp commands.
-          </p>
-        </div>
+        {/* Members see the agent's findings and advice, but cannot triage
+            alerts or inject test threats — that is the bank's and leader's job. */}
+        <AIAgentPanel canReview={false} showSimulator={false} />
       </div>
     );
   }
@@ -389,12 +424,22 @@ export default function MemberDashboard({ activeSection = 'passport', onOpenAIAs
               {rows.length} of {(memberTransactions || []).length} transactions · every row is anchored to Algorand
             </p>
           </div>
-          <input
-            value={auditQuery}
-            onChange={(e) => setAuditQuery(e.target.value)}
-            placeholder="Search by tx id, type, or description"
-            className="w-full max-w-sm border border-border rounded-xl px-3 py-2 text-sm"
-          />
+          <div className="flex flex-wrap items-center gap-2">
+            <input
+              value={auditQuery}
+              onChange={(e) => setAuditQuery(e.target.value)}
+              placeholder="Search by tx id, type, or description"
+              className="flex-1 min-w-56 border border-border rounded-xl px-3 py-2 text-sm"
+            />
+            <button
+              onClick={handleExportStatement}
+              disabled={exporting}
+              className="px-4 py-2 bg-shg-primary text-white rounded-xl font-bold text-sm inline-flex items-center gap-2 disabled:opacity-60"
+            >
+              {exporting ? <Loader2 className="w-4 h-4 animate-spin" /> : <FileSpreadsheet className="w-4 h-4" />}
+              {exporting ? 'Building…' : 'Excel'}
+            </button>
+          </div>
         </div>
 
         <div className="bg-white border border-border/50 rounded-2xl divide-y divide-border/40 overflow-hidden">
@@ -422,14 +467,30 @@ export default function MemberDashboard({ activeSection = 'passport', onOpenAIAs
                       {new Date(tx.createdAt).toLocaleString('en-IN')}
                     </p>
                     {tx.transactionId && (
-                      <a
-                        href={`https://lora.algokit.io/testnet/transaction/${tx.transactionId}`}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="inline-block mt-1 text-[11px] font-mono text-shg-primary hover:underline break-all"
-                      >
-                        {tx.transactionId}
-                      </a>
+                      <span className="flex flex-wrap items-center gap-1.5 mt-1">
+                        <a
+                          href={`https://lora.algokit.io/testnet/transaction/${tx.transactionId}`}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="text-[11px] font-mono text-shg-primary hover:underline break-all"
+                        >
+                          {tx.transactionId}
+                        </a>
+                        <span
+                          className={`text-[9px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded ${
+                            tx.settlementMode === 'live'
+                              ? 'bg-emerald-50 text-emerald-700'
+                              : 'bg-slate-100 text-slate-500'
+                          }`}
+                          title={
+                            tx.settlementMode === 'live'
+                              ? 'Confirmed on Algorand — this link resolves.'
+                              : 'Anchored locally while the relayer was unfunded. This id does not exist on chain.'
+                          }
+                        >
+                          {tx.settlementMode === 'live' ? 'on-chain' : 'local'}
+                        </span>
+                      </span>
                     )}
                   </div>
                   <div className="text-right">
@@ -682,6 +743,103 @@ export default function MemberDashboard({ activeSection = 'passport', onOpenAIAs
 
         {/* Right Column */}
         <div className="lg:col-span-4 space-y-6">
+          {/* Pera Wallet — the real one. Deposits made here genuinely leave the
+              wallet on Algorand TestNet, so the balance below actually drops. */}
+          <div className="dashboard-card bg-white p-6 rounded-2xl border border-border/50">
+            <div className="flex items-center gap-2 mb-4">
+              <div className="w-8 h-8 rounded-lg bg-[#FFEE55] flex items-center justify-center">
+                <Wallet className="w-4 h-4 text-slate-900" />
+              </div>
+              <h4 className="font-headline font-bold text-sm">My Pera Wallet</h4>
+              {walletBalance?.funded && (
+                <span className="ml-auto text-[9px] font-bold text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded">
+                  FUNDED
+                </span>
+              )}
+            </div>
+
+            {linkedWallet ? (
+              <>
+                <div className="p-3 bg-surface rounded-xl mb-4">
+                  <p className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground">
+                    On-chain balance
+                  </p>
+                  <p className="text-2xl font-black font-headline mt-0.5">
+                    {walletBalance ? `${walletBalance.algos} ALGO` : '…'}
+                  </p>
+                  <p className="text-[11px] text-muted-foreground mt-0.5">
+                    ≈ ₹{Number(walletBalance?.inrEquivalent || 0).toLocaleString('en-IN')} at the demo peg
+                  </p>
+                  <a
+                    href={walletBalance?.explorerUrl || '#'}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="inline-flex items-center gap-1 mt-2 text-[11px] font-mono text-shg-primary hover:underline"
+                  >
+                    {shortenAddress(linkedWallet)}
+                    <ExternalLink className="w-3 h-3" />
+                  </a>
+                </div>
+
+                <label className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground">
+                  Deposit to SHG treasury
+                </label>
+                <input
+                  type="number"
+                  min={1}
+                  value={depositAmount}
+                  onChange={(e) => setDepositAmount(e.target.value)}
+                  className="mt-1 mb-3 w-full border border-border rounded-lg px-3 py-2 text-sm"
+                  placeholder="500"
+                />
+                <PeraPaymentButton
+                  amountInr={Number(depositAmount) || 0}
+                  purpose="deposit"
+                  memberId={memberId}
+                  description="Savings deposit settled from Pera Wallet"
+                  disabled={!(Number(depositAmount) > 0)}
+                  onSettled={refreshAfterPayment}
+                />
+
+                {(member?.activeLoansAmount || 0) > 0 && (
+                  <div className="mt-3 pt-3 border-t border-border/50">
+                    <p className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground mb-2">
+                      Outstanding ₹{member?.activeLoansAmount?.toLocaleString('en-IN')}
+                    </p>
+                    <PeraPaymentButton
+                      amountInr={Math.min(1000, member?.activeLoansAmount || 0)}
+                      purpose="loan_repayment"
+                      memberId={memberId}
+                      description="Loan repayment settled from Pera Wallet"
+                      label={`Repay ₹${Math.min(1000, member?.activeLoansAmount || 0).toLocaleString('en-IN')}`}
+                      className="w-full inline-flex items-center justify-center gap-2 bg-white border border-border text-on-surface py-2.5 px-4 rounded-xl font-bold text-sm hover:bg-surface disabled:opacity-60"
+                      onSettled={refreshAfterPayment}
+                    />
+                  </div>
+                )}
+
+                {walletBalance && !walletBalance.funded && (
+                  <p className="text-[10px] text-amber-700 bg-amber-50 rounded-lg px-3 py-2 mt-3">
+                    This wallet has no TestNet ALGO yet. Fund it at{' '}
+                    <a
+                      href="https://bank.testnet.algorand.network"
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="font-bold underline"
+                    >
+                      the dispenser
+                    </a>{' '}
+                    to move real money.
+                  </p>
+                )}
+              </>
+            ) : (
+              <p className="text-xs text-muted-foreground">
+                Connect a Pera Wallet from the profile menu to deposit and repay with real on-chain settlement.
+              </p>
+            )}
+          </div>
+
           {/* QR Code Hub */}
           <div className="dashboard-card bg-white p-6 rounded-2xl border border-border/50 text-center">
             <h3 className="font-headline font-bold text-lg mb-2">Offline Proof</h3>

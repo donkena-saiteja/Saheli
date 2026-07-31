@@ -94,6 +94,7 @@ export async function processBankDisbursement(disbursementId: string, processedB
     description: `Loan disbursed by bank (${disbursement.bankReference})`,
     transactionId,
     status: 'pending',
+    settlementMode: anchor.mode,
     agentProcessed: false,
   });
 

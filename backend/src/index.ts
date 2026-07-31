@@ -14,6 +14,8 @@ import { initializeAgentState } from './services/agentEngine';
 import { getChainInfo } from './services/algorand';
 import { getFacilitatorMode } from './x402/facilitator';
 import { listResources } from './x402/pricing';
+import { getAgentProvider, isOpenAIConfigured } from './services/openai';
+import { runComplianceScan } from './services/aiMonitor';
 
 dotenv.config();
 
@@ -33,10 +35,36 @@ async function ensureDatabaseConnection(): Promise<void> {
     try {
       await initializeAgentState();
       agentStateInitialized = true;
+      startComplianceAgent();
     } catch (err: any) {
       console.error('Failed to initialize agent state:', err.message);
     }
   }
+}
+
+/**
+ * The compliance agent is autonomous: it sweeps the ledger shortly after boot
+ * and then on an interval, so alerts exist before anyone opens a dashboard.
+ * Failures are logged and skipped — surveillance must never take the API down.
+ */
+function startComplianceAgent(): void {
+  const intervalMs = Number(process.env.AI_MONITOR_INTERVAL_MS || 5 * 60 * 1000);
+
+  const sweep = () => {
+    void runComplianceScan()
+      .then((result) => {
+        console.log(
+          `[ai-monitor] swept ${result.scannedTransactions} transactions · ` +
+            `${result.signalsDetected} signal(s) · ${result.alertsOpen} open · via ${result.provider}`,
+        );
+      })
+      .catch((err) => console.warn('[ai-monitor] scan failed:', err?.message || err));
+  };
+
+  setTimeout(sweep, 8000);
+  const timer = setInterval(sweep, Math.max(60_000, intervalMs));
+  // Do not hold the process open just for surveillance.
+  timer.unref?.();
 }
 
 void ensureDatabaseConnection();
@@ -47,6 +75,8 @@ import transactionsRouter from './routes/transactions';
 import loansRouter from './routes/loans';
 import multisigRouter from './routes/multisig';
 import aiAgentRouter from './routes/aiAgent';
+import aiMonitorRouter from './routes/aiMonitor';
+import reportsRouter from './routes/reports';
 import qrcodeRouter from './routes/qrcode';
 import statsRouter from './routes/stats';
 import agentRouter from './routes/agent';
@@ -109,6 +139,8 @@ app.use('/api/transactions', transactionsRouter);
 app.use('/api/loans', loansRouter);
 app.use('/api/multisig', multisigRouter);
 app.use('/api/ai-agent', aiAgentRouter);
+app.use('/api/ai-monitor', aiMonitorRouter);
+app.use('/api/reports', reportsRouter);
 app.use('/api/qr', qrcodeRouter);
 app.use('/api/stats', statsRouter);
 app.use('/api/agent', agentRouter);
@@ -171,6 +203,24 @@ app.get('/health', async (_req, res) => {
       webhook: '/webhook/whatsapp',
       simulator: '/api/whatsapp/simulate',
       voice: Boolean(process.env.OPENAI_API_KEY),
+    },
+
+    aiAgent: {
+      provider: getAgentProvider(),
+      model: isOpenAIConfigured() ? process.env.OPENAI_CHAT_MODEL || 'gpt-4o-mini' : null,
+      monitoring: 'continuous transaction surveillance + fraud typology detection',
+      advisory: 'Government of India scheme allocation for idle treasury funds',
+      endpoints: ['/api/ai-monitor/scan', '/api/ai-monitor/alerts', '/api/ai-monitor/investments'],
+      note: isOpenAIConfigured()
+        ? 'OpenAI reasoning enabled.'
+        : 'Deterministic rule engine active. Set OPENAI_API_KEY for LLM reasoning.',
+    },
+
+    reports: {
+      formats: ['xlsx', 'csv'],
+      catalogue: '/api/reports/catalogue',
+      transactions: '/api/reports/transactions.xlsx',
+      fullLedger: '/api/reports/full-ledger.xlsx',
     },
 
     endpoints: {

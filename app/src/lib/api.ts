@@ -80,26 +80,89 @@ export const transactionsApi = {
 // ─── Loans ────────────────────────────────────────────────────────────────────
 
 export const loansApi = {
-  getAll: () => apiFetch<any[]>('/loans'),
+  getAll: (status?: string) => apiFetch<any[]>(`/loans${status ? `?status=${status}` : ''}`),
   getById: (id: string) => apiFetch<any>(`/loans/${id}`),
   getBankQueue: () => apiFetch<any[]>('/loans/bank-queue/list'),
+  getTreasuryBalance: () => apiFetch<{ balance: number; currency: string }>('/loans/treasury/balance'),
   processBankQueue: (id: string, processedBy?: string) =>
     apiFetch<any>(`/loans/bank-queue/${id}/process`, { method: 'POST', body: JSON.stringify({ processedBy }) }),
   request: (body: { memberId: string; amount: number; purpose: string }) =>
     apiFetch<any>('/loans/request', { method: 'POST', body: JSON.stringify(body) }),
-  approve: (id: string) =>
-    apiFetch<any>(`/loans/${id}/approve`, { method: 'POST', body: JSON.stringify({}) }),
+  approve: (id: string, approvedBy?: string) =>
+    apiFetch<any>(`/loans/${id}/approve`, { method: 'POST', body: JSON.stringify({ approvedBy }) }),
+  decline: (id: string, reason?: string, declinedBy?: string) =>
+    apiFetch<any>(`/loans/${id}/decline`, { method: 'POST', body: JSON.stringify({ reason, declinedBy }) }),
 };
 
 // ─── Multi-Sig ────────────────────────────────────────────────────────────────
 
 export const multisigApi = {
-  getPending: () => apiFetch<any[]>('/multisig/pending'),
-  getAll: () => apiFetch<any[]>('/multisig'),
+  getPending: (destinationRole?: string) =>
+    apiFetch<any[]>(`/multisig/pending${destinationRole ? `?destinationRole=${destinationRole}` : ''}`),
+  getAll: (status?: string) => apiFetch<any[]>(`/multisig${status ? `?status=${status}` : ''}`),
   sign: (id: string, signerId?: string) =>
     apiFetch<any>(`/multisig/${id}/sign`, { method: 'POST', body: JSON.stringify({ signerId }) }),
-  reject: (id: string) =>
-    apiFetch<any>(`/multisig/${id}/reject`, { method: 'POST', body: JSON.stringify({}) }),
+  reject: (id: string, reason?: string, declinedBy?: string) =>
+    apiFetch<any>(`/multisig/${id}/reject`, { method: 'POST', body: JSON.stringify({ reason, declinedBy }) }),
+};
+
+// ─── AI Compliance & Treasury Agent ───────────────────────────────────────────
+
+export const aiMonitorApi = {
+  getStatus: () => apiFetch<any>('/ai-monitor/status'),
+  scan: () => apiFetch<any>('/ai-monitor/scan', { method: 'POST', body: JSON.stringify({}) }),
+  getAlerts: (status: string = 'open') => apiFetch<any[]>(`/ai-monitor/alerts?status=${status}`),
+  reviewAlert: (id: string, status: 'cleared' | 'escalated' | 'open', note?: string) =>
+    apiFetch<any>(`/ai-monitor/alerts/${id}/review`, {
+      method: 'POST',
+      body: JSON.stringify({ status, note }),
+    }),
+  getInvestments: () => apiFetch<any>('/ai-monitor/investments'),
+  getSchemes: () => apiFetch<any[]>('/ai-monitor/schemes'),
+  ask: (question: string) =>
+    apiFetch<any>('/ai-monitor/ask', { method: 'POST', body: JSON.stringify({ question }) }),
+  simulateThreat: (pattern: 'structuring' | 'velocity' | 'round_trip' = 'structuring') =>
+    apiFetch<any>('/ai-monitor/simulate-threat', { method: 'POST', body: JSON.stringify({ pattern }) }),
+};
+
+// ─── Downloadable reports ─────────────────────────────────────────────────────
+
+export const reportsApi = {
+  getCatalogue: () => apiFetch<any[]>('/reports/catalogue'),
+  /** Absolute URL for a report, so it can be used as an <a href> or fetched. */
+  url: (report: string, format: 'xlsx' | 'csv' = 'xlsx', params?: Record<string, string>) => {
+    const query = params ? `?${new URLSearchParams(params).toString()}` : '';
+    return `${BASE_URL}/reports/${report}.${format}${query}`;
+  },
+  /**
+   * Downloads through fetch rather than a plain link so the Authorization
+   * header travels with the request and errors surface as real errors.
+   */
+  download: async (report: string, format: 'xlsx' | 'csv' = 'xlsx', params?: Record<string, string>) => {
+    const token = localStorage.getItem('saheli-token');
+    const res = await fetch(reportsApi.url(report, format, params), {
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+    });
+
+    if (!res.ok) {
+      const detail = await res.json().catch(() => ({ error: `HTTP ${res.status}` }));
+      throw new Error(detail.error || `Download failed with HTTP ${res.status}`);
+    }
+
+    const blob = await res.blob();
+    const stamp = new Date().toISOString().slice(0, 10);
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `saheli-${report}-${stamp}.${format}`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    // Revoke on the next tick so the download has actually started.
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+
+    return { bytes: blob.size, filename: a.download };
+  },
 };
 
 // ─── AI Agent ─────────────────────────────────────────────────────────────────
@@ -247,6 +310,29 @@ export const algorandApi = {
   getHealth: () => apiFetch<any>('/algorand/health'),
   getTx: (txId: string) => apiFetch<any>(`/algorand/tx/${txId}`),
   getWallet: (memberId: string) => apiFetch<any>(`/algorand/wallet/${memberId}`),
+  getBalance: (address: string) => apiFetch<any>(`/algorand/balance/${address}`),
+  getRate: () => apiFetch<any>('/algorand/rate'),
+
+  /** Step 1 of a real wallet payment: the server builds the unsigned txn. */
+  preparePayment: (body: {
+    fromAddress: string;
+    amountInr: number;
+    purpose: 'deposit' | 'withdrawal' | 'loan_disbursement' | 'loan_repayment' | 'yield';
+    toAddress?: string;
+    toMemberId?: string;
+    memberId?: string;
+    linkedLoanId?: string;
+    description?: string;
+  }) => apiFetch<any>('/algorand/payment/prepare', { method: 'POST', body: JSON.stringify(body) }),
+
+  /** Step 3: broadcast what Pera signed and record the settled movement. */
+  submitPayment: (body: {
+    signedTxn: string;
+    purpose: string;
+    memberId?: string;
+    linkedLoanId?: string;
+    description?: string;
+  }) => apiFetch<any>('/algorand/payment/submit', { method: 'POST', body: JSON.stringify(body) }),
 };
 
 // ─── WhatsApp banking ─────────────────────────────────────────────────────────

@@ -1,55 +1,61 @@
 import { Router, Request, Response } from 'express';
 import mongoose from 'mongoose';
-import { v4 as uuidv4 } from 'uuid';
 import LoanModel from '../models/Loan';
 import User from '../models/User';
 import MultiSigActionModel from '../models/MultiSigAction';
 import BankDisbursement from '../models/BankDisbursement';
-import { anchorLedgerEntry } from '../services/algorand';
-import { queueBankDisbursement, processBankDisbursement } from '../services/bankDisbursementService';
+import { explorerTxUrl } from '../services/algorand';
+import { processBankDisbursement } from '../services/bankDisbursementService';
+import {
+  LEADER_APPROVALS_REQUIRED,
+  declineLoan,
+  getTreasuryBalance,
+  openLoanApproval,
+  settleApprovedLoan,
+} from '../services/loanWorkflow';
 
 const router = Router();
 
 function evaluateLoan(trustScore: number, amount: number, purpose: string): {
   recommendation: 'approve' | 'review' | 'reject';
   reason: string;
-  fastTrack: boolean;
+  isEmergency: boolean;
 } {
-  const isEmergency = /medical|hospital|emergency|health/i.test(purpose);
+  const isEmergency = /medical|hospital|emergency|health|accident|urgent/i.test(purpose);
   const isMicroLoan = amount <= 5000;
 
   if (trustScore >= 800 && isMicroLoan) {
     return {
       recommendation: 'approve',
-      reason: `Trust score ${trustScore}/1000. Micro-loan qualifies for fast-track leader approval.`,
-      fastTrack: true,
+      reason: `Trust score ${trustScore}/1000 with a micro-loan amount. Recommend approval.`,
+      isEmergency,
     };
   }
   if (trustScore >= 750 && isEmergency) {
     return {
       recommendation: 'approve',
-      reason: `Emergency medical loan. Trust score ${trustScore}/1000 clears emergency threshold. Routing for expedited 1/3 approval.`,
-      fastTrack: true,
+      reason: `Emergency request. Trust score ${trustScore}/1000 clears the emergency threshold. Recommend immediate approval.`,
+      isEmergency,
     };
   }
   if (trustScore >= 700) {
     return {
       recommendation: 'approve',
-      reason: `Trust score ${trustScore}/1000 meets approval threshold. Routing for standard approval.`,
-      fastTrack: false,
+      reason: `Trust score ${trustScore}/1000 meets the approval threshold.`,
+      isEmergency,
     };
   }
   if (trustScore >= 600) {
     return {
       recommendation: 'review',
-      reason: `Trust score ${trustScore}/1000 is below confidence threshold. Manual review by SHG leader recommended.`,
-      fastTrack: false,
+      reason: `Trust score ${trustScore}/1000 is below the confidence threshold. Leader review recommended before approval.`,
+      isEmergency,
     };
   }
   return {
     recommendation: 'reject',
-    reason: `Trust score ${trustScore}/1000 is insufficient for this loan amount. Member should improve repayment consistency first.`,
-    fastTrack: false,
+    reason: `Trust score ${trustScore}/1000 is insufficient for this amount. Member should build repayment consistency first.`,
+    isEmergency,
   };
 }
 
@@ -65,18 +71,22 @@ function mapLoan(doc: any) {
     aiRecommendation: doc.aiRecommendation,
     aiReason: doc.aiReason,
     approvals: doc.approvals,
-    approvalsRequired: doc.approvalsRequired,
+    approvalsRequired: doc.approvalsRequired ?? LEADER_APPROVALS_REQUIRED,
     disbursedAt: doc.disbursedAt,
     dueDate: doc.dueDate,
     repaidAmount: doc.repaidAmount,
     createdAt: doc.createdAt,
     transactionId: doc.transactionId,
+    explorerUrl: doc.transactionId ? explorerTxUrl(doc.transactionId) : null,
   };
 }
 
-// GET /api/loans
-router.get('/', async (_req: Request, res: Response) => {
-  const loans = await LoanModel.find()
+// GET /api/loans?status=pending
+router.get('/', async (req: Request, res: Response) => {
+  const filter: Record<string, unknown> = {};
+  if (req.query.status) filter.status = String(req.query.status);
+
+  const loans = await LoanModel.find(filter)
     .populate('user', 'name')
     .sort({ createdAt: -1 })
     .lean();
@@ -153,7 +163,6 @@ router.post('/request', async (req: Request, res: Response) => {
   }
 
   const evaluation = evaluateLoan(member.trustScore || 700, normalizedAmount, String(purpose));
-  const approvalsRequired = evaluation.fastTrack ? 1 : 3;
 
   const loan = await LoanModel.create({
     user: member._id,
@@ -164,23 +173,17 @@ router.post('/request', async (req: Request, res: Response) => {
     aiRecommendation: evaluation.recommendation,
     aiReason: evaluation.reason,
     approvals: 0,
-    approvalsRequired,
+    approvalsRequired: LEADER_APPROVALS_REQUIRED,
     repaidAmount: 0,
   });
 
+  // Exactly one pending approval, even if the request is retried.
   if (evaluation.recommendation !== 'reject') {
-    await MultiSigActionModel.create({
-      id: uuidv4(),
-      type: 'loan_approval',
-      description: `Loan approval for ${member.name}`,
+    await openLoanApproval({
+      loanId: String(loan._id),
+      memberName: member.name,
       amount: normalizedAmount,
-      requestedBy: member.name,
-      signatures: [],
-      signaturesRequired: approvalsRequired,
-      status: 'pending',
-      linkedLoanId: String(loan._id),
-      destinationRole: 'leader',
-      createdAt: new Date().toISOString(),
+      isEmergency: evaluation.isEmergency,
     });
   }
 
@@ -191,12 +194,16 @@ router.post('/request', async (req: Request, res: Response) => {
     data: {
       loan: mapLoan(hydrated || loan.toObject()),
       evaluation,
-      message: 'Loan request submitted. Leader approval is required before funds are disbursed and QR proof is generated.',
+      approvalsRequired: LEADER_APPROVALS_REQUIRED,
+      message:
+        evaluation.recommendation === 'reject'
+          ? 'Loan request recorded but not routed for approval — trust score is below the lending threshold.'
+          : 'Loan request submitted. One SHG leader approval releases the funds.',
     },
   });
 });
 
-// POST /api/loans/:id/approve
+// POST /api/loans/:id/approve — the single leader sign-off
 router.post('/:id/approve', async (req: Request, res: Response) => {
   if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
     res.status(404).json({ success: false, error: 'Loan not found' });
@@ -214,48 +221,63 @@ router.post('/:id/approve', async (req: Request, res: Response) => {
     return;
   }
 
-  loan.approvals += 1;
+  const approvedBy = String(req.body.signerId || req.body.approvedBy || 'SHG Leader');
+  const settlement = await settleApprovedLoan(String(loan._id), approvedBy);
 
-  let message = `Approval ${loan.approvals}/${loan.approvalsRequired} recorded.`;
-  if (loan.approvals >= loan.approvalsRequired) {
-    loan.status = 'bank_pending';
-    const approvalAnchor = await anchorLedgerEntry({
-      kind: 'loan_disbursement',
-      memberId: String(loan.user),
-      amount: loan.amount,
-      detail: `leader-approved:${loan.purpose}`,
-    });
-    loan.transactionId = approvalAnchor.txId;
-    loan.disbursedAt = new Date();
-    loan.dueDate = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
-    message = 'Approval threshold reached! Loan moved for bank payout processing.';
-
-    await queueBankDisbursement({
-      loanId: String(loan._id),
-      userId: String(loan.user),
-      amount: loan.amount,
-      notes: 'Manual leader approval endpoint triggered',
-      autoProcess: true,
-    });
-  }
-
-  await loan.save();
-
-  const action = await MultiSigActionModel.findOne({ linkedLoanId: String(loan._id), status: 'pending' });
-  if (action) {
-    const signerId = req.body.signerId || 'leader_manual';
-    action.signatures = Array.from(new Set([...(action.signatures || []), signerId]));
-    action.signaturesRequired = loan.approvalsRequired;
-    if (loan.status !== 'pending') {
-      action.status = 'executed';
-      action.transactionId = loan.transactionId;
-    }
-    await action.save();
-  }
+  // Close the linked approval record so the loan cannot be approved twice from
+  // the multi-sig panel.
+  await MultiSigActionModel.updateMany(
+    { linkedLoanId: String(loan._id), status: 'pending' },
+    {
+      $set: {
+        status: 'executed',
+        signatures: [approvedBy],
+        signaturesRequired: LEADER_APPROVALS_REQUIRED,
+        transactionId: settlement.transactionId,
+      },
+    },
+  );
 
   const hydrated = await LoanModel.findById(loan._id).populate('user', 'name').lean();
-  const mapped = mapLoan(hydrated || loan.toObject());
-  res.json({ success: true, data: { loan: mapped, message } });
+
+  res.json({
+    success: true,
+    data: {
+      loan: mapLoan(hydrated || loan.toObject()),
+      settlement,
+      message:
+        `Approved by ${approvedBy}. ₹${loan.amount.toLocaleString('en-IN')} debited from the SHG treasury ` +
+        `(balance now ₹${settlement.treasuryBalanceAfter.toLocaleString('en-IN')}).`,
+    },
+  });
+});
+
+// POST /api/loans/:id/decline — rejects this loan only
+router.post('/:id/decline', async (req: Request, res: Response) => {
+  const result = await declineLoan({
+    loanId: req.params.id,
+    reason: req.body?.reason,
+    declinedBy: req.body?.declinedBy || 'SHG Leader',
+  });
+
+  const hydrated = await LoanModel.findById(result.loanId).populate('user', 'name').lean();
+
+  res.json({
+    success: true,
+    data: {
+      loan: hydrated ? mapLoan(hydrated) : null,
+      ...result,
+      message:
+        `Loan declined. ${result.actionsRejected} linked approval closed. ` +
+        `${result.remainingPending} other approval${result.remainingPending === 1 ? '' : 's'} still pending and untouched.`,
+    },
+  });
+});
+
+// GET /api/loans/treasury/balance — what the pool can lend right now
+router.get('/treasury/balance', async (_req: Request, res: Response) => {
+  const balance = await getTreasuryBalance();
+  res.json({ success: true, data: { balance, currency: 'INR' } });
 });
 
 export default router;
