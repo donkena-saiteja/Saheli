@@ -38,6 +38,8 @@ const RESOURCE_META: Record<string, { icon: string; label: string; payer: string
   'verify-proof': { icon: '🔍', label: 'Proof Verification', payer: 'Fintech at scale' },
   'grant-eligibility': { icon: '📜', label: 'Grant Milestone Attestation', payer: 'NGO / Government' },
   'ai-underwriting': { icon: '🤖', label: 'Agentic Underwriting Opinion', payer: 'AI agent' },
+  'loan-request': { icon: '📝', label: 'Loan Request Underwriting', payer: 'SHG member (Pera)' },
+  'loan-approval': { icon: '✅', label: 'Loan Disbursement Approval', payer: 'SHG leader (Pera)' },
 };
 
 export default function X402Console() {
@@ -50,8 +52,17 @@ export default function X402Console() {
 
   const { data: catalogue } = useApiFetch(() => x402Api.getCatalogue(), []);
   const { data: revenue, refetch: refetchRevenue } = useApiFetch(() => x402Api.getRevenue(), []);
+  const { data: receiver } = useApiFetch(() => x402Api.getReceiver(), []);
 
-  const resources = catalogue?.resources || [];
+  /**
+   * This console drives the machine-to-machine resources, which a server key
+   * can pay end to end. The two loan gates are deliberately excluded: they are
+   * settled by a human approving in Pera Wallet, so they are exercised from the
+   * member and leader dashboards instead — and listed read-only below.
+   */
+  const allResources = catalogue?.resources || [];
+  const resources = allResources.filter((r: any) => !r.walletSigned);
+  const walletResources = allResources.filter((r: any) => r.walletSigned);
   const active = resources.find((r: any) => r.id === selected);
 
   /** Step 0: hit the endpoint with no payment and show the raw 402. */
@@ -299,6 +310,85 @@ export default function X402Console() {
           <pre className="p-4 text-[11px] font-mono overflow-x-auto max-h-96 text-emerald-900 leading-relaxed">
             {JSON.stringify(unlocked, null, 2)}
           </pre>
+        </div>
+      )}
+
+      {/* Wallet-signed gates — the loan flows, settled by a human in Pera */}
+      {walletResources.length > 0 && (
+        <div className="rounded-xl bg-white border border-border/60 overflow-hidden">
+          <div className="px-4 py-3 border-b border-border/60 flex items-center gap-2">
+            <ShieldCheck className="w-4 h-4 text-shg-primary" />
+            <h3 className="font-bold text-on-surface text-sm">
+              Wallet-signed gates — x402 on the loan lifecycle
+            </h3>
+          </div>
+
+          <div className="px-4 py-3 bg-shg-primary/[0.04] border-b border-border/60">
+            <p className="text-xs text-muted-foreground leading-relaxed">
+              These two are the load-bearing ones. A loan <strong>cannot be requested</strong> and{' '}
+              <strong>cannot be approved</strong> until the person doing it settles a payment from
+              their own Pera Wallet — the API returns <code className="font-mono">402</code> until it
+              does. Run them from the Member and Leader dashboards.
+            </p>
+          </div>
+
+          <div className="divide-y divide-border/50">
+            {walletResources.map((r: any) => (
+              <div key={r.id} className="px-4 py-3 flex items-center justify-between gap-4">
+                <div className="min-w-0">
+                  <p className="font-semibold text-sm text-on-surface">
+                    {RESOURCE_META[r.id]?.icon} {RESOURCE_META[r.id]?.label || r.id}
+                  </p>
+                  <p className="text-[11px] text-muted-foreground font-mono truncate">
+                    {r.method} {r.path}
+                  </p>
+                  <p className="text-[11px] text-muted-foreground">
+                    Paid by {RESOURCE_META[r.id]?.payer}
+                  </p>
+                </div>
+                <div className="text-right flex-shrink-0">
+                  <p className="font-black text-shg-primary">{r.displayPrice}</p>
+                  <p className="text-[10px] text-muted-foreground">native ALGO</p>
+                </div>
+              </div>
+            ))}
+          </div>
+
+          {receiver && (
+            <div className="px-4 py-3 border-t border-border/60 bg-surface/50">
+              <p className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground mb-1">
+                Hardcoded receiver {receiver.hardcoded ? '(compiled in)' : '(from env)'}
+              </p>
+              <a
+                href={receiver.explorerUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-flex items-start gap-1 text-[11px] font-mono text-shg-primary hover:underline break-all"
+              >
+                {receiver.address}
+                <ExternalLink className="w-3 h-3 flex-shrink-0 mt-0.5" />
+              </a>
+              <p className="text-[11px] mt-1">
+                <span className={receiver.funded ? 'text-emerald-600' : 'text-amber-600'}>
+                  {receiver.algos} ALGO
+                </span>
+                <span className="text-muted-foreground"> · {receiver.network}</span>
+                {!receiver.funded && receiver.dispenser && (
+                  <>
+                    {' · '}
+                    <a
+                      href={receiver.dispenser}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="text-amber-700 underline"
+                    >
+                      fund it
+                    </a>
+                  </>
+                )}
+              </p>
+            </div>
+          )}
         </div>
       )}
 

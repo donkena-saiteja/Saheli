@@ -8,6 +8,7 @@
     "build": "tsc",
     "start": "node dist/index.js",
     "verify": "ts-node --transpile-only src/scripts/verify.ts",
+    "verify:x402": "node scripts/verify-x402-loan-gate.js",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

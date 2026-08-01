@@ -13,7 +13,7 @@ import { connectDB, isDatabaseReady, isMemoryDatabase } from './config/db';
 import { initializeAgentState } from './services/agentEngine';
 import { getChainInfo } from './services/algorand';
 import { getFacilitatorMode } from './x402/facilitator';
-import { listResources } from './x402/pricing';
+import { getPayToAddress, listResources } from './x402/pricing';
 import { getAgentProvider, isOpenAIConfigured } from './services/openai';
 import { runComplianceScan } from './services/aiMonitor';
 
@@ -194,6 +194,18 @@ app.get('/health', async (_req, res) => {
       facilitator: getFacilitatorMode(),
       pricedResources: listResources().length,
       catalogue: '/api/x402/catalogue',
+      // The mandatory requirement, made load-bearing: these two routes are
+      // unusable until the caller's own Pera Wallet settles a payment.
+      walletSignedGates: listResources()
+        .filter((r) => r.walletSigned)
+        .map((r) => ({
+          resource: r.id,
+          route: `${r.method} ${r.path}`,
+          price: r.displayPrice,
+          asset: 'native ALGO',
+          payer: r.payerType,
+        })),
+      loanReceiver: getPayToAddress('loan-request'),
     },
 
     whatsapp: {
@@ -229,6 +241,10 @@ app.get('/health', async (_req, res) => {
       agent: ['GET /api/agent/status', 'POST /api/agent/invest', 'POST /api/agent/emergency-loan'],
       algorand: ['GET /api/algorand/info', 'GET /api/algorand/tx/:txId', 'GET /api/algorand/wallet/:memberId'],
       x402: [
+        'POST /api/loans/request                [402 PAID · Pera]',
+        'POST /api/multisig/:id/sign            [402 PAID · Pera]',
+        'GET  /api/x402/wallet/receiver',
+        'POST /api/x402/wallet/prepare',
         'GET  /api/x402/catalogue',
         'GET  /api/x402/supported',
         'GET  /api/x402/credit-report/:shgId    [402 PAID]',

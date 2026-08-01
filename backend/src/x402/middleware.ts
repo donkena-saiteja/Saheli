@@ -18,6 +18,7 @@ import X402Payment from '../models/X402Payment';
 import {
   PRICED_RESOURCES,
   ResourceId,
+  getAssetSymbol,
   getPayToAddress,
   getSettlementAsset,
   toDisplayAmount,
@@ -38,21 +39,29 @@ export interface PaidRequest extends Request {
   };
 }
 
-/** Builds the PaymentRequirements advertised for a priced resource. */
+/**
+ * Builds the PaymentRequirements advertised for a priced resource.
+ *
+ * Wallet-signed resources deliberately omit `feePayer`: the payer's own Pera
+ * wallet covers the fee, so advertising a relayer would invite a client to
+ * build a group the relayer never agreed to fund.
+ */
 export function buildRequirements(resourceId: ResourceId): PaymentRequirements {
   const resource = PRICED_RESOURCES[resourceId];
   return {
     scheme: SCHEME_EXACT,
     network: getCaip2Network() as Network,
-    asset: getSettlementAsset(),
+    asset: getSettlementAsset(resourceId),
     amount: resource.amount,
-    payTo: getPayToAddress(),
+    payTo: getPayToAddress(resourceId),
     maxTimeoutSeconds: resource.maxTimeoutSeconds,
     extra: {
-      feePayer: getRelayerAccount().address,
+      ...(resource.walletSigned ? {} : { feePayer: getRelayerAccount().address }),
       displayPrice: resource.displayPrice,
-      assetSymbol: 'USDC',
+      assetSymbol: getAssetSymbol(resourceId),
       assetDecimals: 6,
+      payerType: resource.payerType,
+      settledBy: resource.walletSigned ? 'pera-wallet' : 'server-key',
     },
   };
 }

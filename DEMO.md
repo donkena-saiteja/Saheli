@@ -104,7 +104,45 @@ Open **<http://127.0.0.1:3001/health>**.
 
 Point at: `algorand.settlementMode: "live"`, `x402.enabled: true`, `aiAgent.provider`.
 
-### Minute 1–3 · x402 — the mandatory requirement
+### Minute 1–3 · x402 gating a real action  ★ LEAD WITH THIS
+
+> **Setup:** two Pera Wallet accounts on TestNet, each holding at least 0.2 ALGO — one for the member, one for the leader. Both must be on **TestNet** in Pera's settings.
+
+**Step 1 — show the gate before you pay it.** In a terminal:
+
+```bash
+curl -i -X POST http://127.0.0.1:3001/api/loans/request -H "Content-Type: application/json" -d "{}"
+```
+
+> "Requesting a loan returns a real HTTP **402 Payment Required**. Not a mock, not a paywall on a demo endpoint — this is the actual loan route. Scheme `exact`, the Algorand CAIP-2 network id, asset `0` meaning native ALGO, price 50000 microAlgos, and a `payTo` address hardcoded in the backend."
+
+**Step 2 — member pays.** Log in as **Member** (sign in with Pera Wallet) → **Request Loan** → enter ₹5,000, pick *Medical* → **Pay 0.05 ALGO & Submit**.
+
+Narrate the five steps as they light up on screen:
+
+| Step | Say this |
+|---|---|
+| 1 | "The 402 challenge — the price and the terms the server advertised." |
+| 2 | "The server builds the payment. Note that: **the server** decides the receiver and the amount, so the browser can't redirect the money." |
+| 3 | "Pera asks her to approve it. **Her private key never leaves her phone.**" |
+| 4 | "The facilitator runs all 8 checks from the exact-AVM spec, then broadcasts to Algorand and waits for confirmation." |
+| 5 | "Only now does the loan exist." |
+
+**Open the transaction id in Lora.** It resolves — real TestNet, real money, real finality.
+
+**Step 3 — leader pays.** Switch to **Leader** → the approval queue → **Pay 0.05 ALGO & Approve**. Same five steps, different wallet, different payer role.
+
+> "So x402 isn't decorating this product — it's load-bearing. A loan cannot be requested and cannot be approved without a settled on-chain payment from the specific person doing it. If the payment fails, nothing happens: no loan, no treasury movement."
+
+**If a judge asks "did you just fake the txid?":**
+
+```bash
+cd backend && npm run verify:x402
+```
+
+> "Sixteen assertions. Including one that specifically proves settlement reaches the Algorand node rather than silently returning a fabricated transaction id — we pay from an empty wallet and assert that **algod itself** rejects it."
+
+### Minute 3–4 · x402 as a business model
 
 Log in as **Bank** → sidebar → **x402 Pay-per-Use**.
 
@@ -127,6 +165,10 @@ Walk the five steps as they render:
 Then scroll to the revenue panel:
 
 > "This is the part I actually care about. An SHG's repayment history is its most valuable asset, and today banks extract it for free. Here, institutional access is metered per call and **the money flows back to the women**. That's not a paywall bolted onto a demo — it is the business model."
+
+Scroll to **Wallet-signed gates**:
+
+> "And these two are the loan gates you just saw me pay. Same protocol, same facilitator — but settled by a person in Pera rather than a server key. There's the hardcoded receiver address and its live balance; you watched it go up twice."
 
 ### Minute 3–4.5 · The AI agent catching fraud, live
 

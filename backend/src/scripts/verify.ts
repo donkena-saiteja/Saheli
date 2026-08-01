@@ -21,6 +21,7 @@ interface Check {
   name: string;
   passed: boolean;
   detail: string;
+  skipped?: boolean;
 }
 
 const checks: Check[] = [];
@@ -30,6 +31,51 @@ function record(name: string, passed: boolean, detail: string) {
   const mark = passed ? '\x1b[32mPASS\x1b[0m' : '\x1b[31mFAIL\x1b[0m';
   console.log(`  ${mark}  ${name}`);
   if (detail) console.log(`        ${detail}`);
+}
+
+/** For checks that need a funded wallet we were not given. Not a failure. */
+function skip(name: string, reason: string) {
+  checks.push({ name, passed: true, detail: reason, skipped: true });
+  console.log(`  \x1b[33mSKIP\x1b[0m  ${name}`);
+  console.log(`        ${reason}`);
+}
+
+/**
+ * Settles a wallet-signed x402 payment the way the browser does, standing in
+ * for Pera with a local key.
+ *
+ * Returns null when no funded payer was supplied, so the caller can skip rather
+ * than fail — the gate itself is asserted separately and always runs.
+ */
+async function x402PayFromWallet(
+  resourceId: 'loan-request' | 'loan-approval',
+  context?: Record<string, unknown>,
+): Promise<string | null> {
+  const mnemonic = process.env.VERIFY_PAYER_MNEMONIC?.trim();
+  if (!mnemonic) return null;
+
+  const payer = algosdk.mnemonicToSecretKey(mnemonic);
+  const prepared = await json('/api/x402/wallet/prepare', {
+    method: 'POST',
+    body: JSON.stringify({ resourceId, payerAddress: payer.addr.toString(), context }),
+  });
+
+  const data = prepared.body?.data;
+  if (!data?.unsignedTxn) {
+    console.log(`        x402 prepare failed: ${prepared.body?.error || prepared.status}`);
+    return null;
+  }
+
+  const txn = algosdk.decodeUnsignedTransaction(Buffer.from(data.unsignedTxn, 'base64'));
+  const signed = Buffer.from(txn.signTxn(payer.sk)).toString('base64');
+
+  return Buffer.from(
+    JSON.stringify({
+      x402Version: 2,
+      accepted: data.requirements,
+      payload: { paymentGroup: [signed], paymentIndex: 0 },
+    }),
+  ).toString('base64');
 }
 
 async function json(path: string, init?: RequestInit): Promise<{ status: number; body: any; headers: Headers }> {
@@ -363,14 +409,46 @@ async function main() {
   const borrower = membersList.body.data?.[0];
   const treasuryBefore = await json('/api/loans/treasury/balance');
 
-  const loanReq = await json('/api/loans/request', {
+  // ── The x402 gates, asserted first: these always run ──
+  const unpaidRequest = await json('/api/loans/request', {
     method: 'POST',
     body: JSON.stringify({ memberId: borrower?._id, amount: 3000, purpose: 'verification loan' }),
   });
+  const requestTerms = unpaidRequest.body?.accepts?.[0];
   record(
-    'Loan request needs exactly one leader approval',
+    'Loan request is x402-gated (402 without payment)',
+    unpaidRequest.status === 402 && requestTerms?.scheme === 'exact',
+    `status=${unpaidRequest.status} price=${requestTerms?.extra?.displayPrice} payTo=${requestTerms?.payTo?.slice(0, 10)}…`,
+  );
+  record(
+    'Loan request settles in native ALGO to the hardcoded receiver',
+    requestTerms?.asset === '0' && Boolean(requestTerms?.payTo),
+    `asset=${requestTerms?.asset} receiver=${requestTerms?.payTo}`,
+  );
+
+  const requestHeader = await x402PayFromWallet('loan-request', { purpose: 'verification loan' });
+  if (!requestHeader) {
+    skip(
+      'Loan approval workflow (needs a funded wallet)',
+      'Set VERIFY_PAYER_MNEMONIC to a funded 25-word TestNet mnemonic to settle the x402 fees and run the full workflow.',
+    );
+    return finish();
+  }
+
+  const loanReq = await json('/api/loans/request', {
+    method: 'POST',
+    headers: { 'X-PAYMENT': requestHeader },
+    body: JSON.stringify({ memberId: borrower?._id, amount: 3000, purpose: 'verification loan' }),
+  });
+  record(
+    'Paid loan request needs exactly one leader approval',
     loanReq.status === 201 && loanReq.body.data?.loan?.approvalsRequired === 1,
     `approvalsRequired=${loanReq.body.data?.loan?.approvalsRequired}`,
+  );
+  record(
+    'Loan request fee settled on-chain',
+    loanReq.body.data?.x402?.settlement === 'onchain',
+    `settlement=${loanReq.body.data?.x402?.settlement} tx=${loanReq.body.data?.x402?.transaction}`,
   );
 
   const queueBefore = await json('/api/multisig/pending');
@@ -383,14 +461,32 @@ async function main() {
   );
 
   const otherPending = (queueBefore.body.data || []).filter((a: any) => a.id !== myAction?.id);
-  const approve = await json(`/api/multisig/${myAction?.id}/sign`, {
+
+  const unpaidApprove = await json(`/api/multisig/${myAction?.id}/sign`, {
     method: 'POST',
     body: JSON.stringify({ signerId: 'verify_leader' }),
   });
   record(
-    'One signature approves and settles the loan',
+    'Leader approval is x402-gated (402 without payment)',
+    unpaidApprove.status === 402,
+    `status=${unpaidApprove.status} price=${unpaidApprove.body?.accepts?.[0]?.extra?.displayPrice}`,
+  );
+
+  const approveHeader = await x402PayFromWallet('loan-approval', { actionId: myAction?.id });
+  const approve = await json(`/api/multisig/${myAction?.id}/sign`, {
+    method: 'POST',
+    headers: approveHeader ? { 'X-PAYMENT': approveHeader } : {},
+    body: JSON.stringify({ signerId: 'verify_leader' }),
+  });
+  record(
+    'One paid signature approves and settles the loan',
     approve.status === 200 && approve.body.data?.action?.status === 'executed',
     `status=${approve.body.data?.action?.status} signatures=${approve.body.data?.action?.signatures?.length}/1`,
+  );
+  record(
+    'Leader approval fee settled on-chain',
+    approve.body.data?.x402?.settlement === 'onchain',
+    `settlement=${approve.body.data?.x402?.settlement} tx=${approve.body.data?.x402?.transaction}`,
   );
 
   const treasuryAfter = await json('/api/loans/treasury/balance');
@@ -547,13 +643,21 @@ async function main() {
     );
   }
 
-  // ── Summary ──
-  const passed = checks.filter((c) => c.passed).length;
-  const failed = checks.length - passed;
+  finish();
+}
+
+/** Prints the summary table and sets the exit code. */
+function finish(): never {
+  const skipped = checks.filter((c) => c.skipped).length;
+  const passed = checks.filter((c) => c.passed && !c.skipped).length;
+  const failed = checks.filter((c) => !c.passed).length;
 
   console.log(`\n${'─'.repeat(62)}`);
   if (failed === 0) {
-    console.log(`\x1b[32m\x1b[1m  ALL ${passed} CHECKS PASSED\x1b[0m`);
+    console.log(
+      `\x1b[32m\x1b[1m  ALL ${passed} CHECKS PASSED\x1b[0m` +
+        (skipped ? `\x1b[33m  (${skipped} skipped)\x1b[0m` : ''),
+    );
   } else {
     console.log(`\x1b[31m\x1b[1m  ${failed} of ${checks.length} CHECKS FAILED\x1b[0m`);
     for (const c of checks.filter((x) => !x.passed)) {

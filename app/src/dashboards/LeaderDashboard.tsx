@@ -41,6 +41,9 @@ import QRCodeDisplay from '../components/QRCodeDisplay';
 import AIAgentPanel from '../components/AIAgentPanel';
 import TxReference from '../components/TxReference';
 import PeraPaymentButton from '../components/PeraPaymentButton';
+import X402ProtocolSteps from '../components/X402ProtocolSteps';
+import { useX402Payment } from '../hooks/useX402Payment';
+import { isUserCancellation } from '../lib/pera';
 
 const Skeleton = ({ className = '' }: { className?: string }) => (
   <div className={`bg-surface animate-pulse rounded-lg ${className}`} />
@@ -91,10 +94,19 @@ export default function LeaderDashboard({ isReadOnly = false, activeSection = 't
   // Full SHG ledger for the audit view — every anchored movement, newest first.
   const { data: ledger, loading: loadingLedger } = useApiPolling(() => transactionsApi.getLedger(), 15000);
 
-  const { mutate: signAction } = useApiMutation((id: string) => multisigApi.sign(id, 'Leader'));
   const { mutate: rejectAction } = useApiMutation((input: { id: string; reason?: string }) =>
     multisigApi.reject(input.id, input.reason, 'Leader'),
   );
+
+  /**
+   * The x402 gate on approval.
+   *
+   * `/api/multisig/:id/sign` answers 402 until the leader's own Pera wallet has
+   * settled the disbursement fee, so no treasury movement can happen without a
+   * real, explorer-verifiable payment from the person authorising it.
+   */
+  const { steps: approvalSteps, receipt: approvalReceipt, payAndRun: payAndApprove } =
+    useX402Payment('loan-approval');
   const { mutate: createTransaction, loading: creatingTx } = useApiMutation((body: any) => transactionsApi.create(body));
 
   /**
@@ -136,14 +148,25 @@ export default function LeaderDashboard({ isReadOnly = false, activeSection = 't
   }, [loadingTreasury]);
 
   /**
-   * A single leader signature approves and settles the loan.
-   * `busyActionId` scopes the spinner to the card that was clicked, so
-   * approving one request never greys out the rest of the queue.
+   * A single leader signature approves and settles the loan — after the leader
+   * has paid the x402 disbursement fee from their own Pera wallet.
+   *
+   * `busyActionId` scopes the spinner and the protocol panel to the card that
+   * was clicked, so approving one request never greys out the rest of the queue.
    */
-  const handleApprove = async (id: string) => {
+  const handleApprove = async (id: string, action: any) => {
     setBusyActionId(id);
     try {
-      const res = await signAction(id);
+      const res = await payAndApprove(
+        {
+          actionId: id,
+          loanId: action?.linkedLoanId,
+          amountInr: action?.amount,
+          purpose: action?.description,
+        },
+        (paymentHeader) => multisigApi.sign(id, paymentHeader, 'Leader'),
+      );
+
       setActionMessages((prev) => ({ ...prev, [id]: res.message }));
       toast.success(res.message);
       if (res.settlement?.requiresWalletSettlement && res.settlement?.walletHint) {
@@ -151,7 +174,11 @@ export default function LeaderDashboard({ isReadOnly = false, activeSection = 't
       }
       await refreshAfterSettlement();
     } catch (err) {
-      toast.error((err as Error).message || 'Could not approve — is the API running?');
+      if (isUserCancellation(err)) {
+        toast.info('Cancelled in Pera Wallet — nothing was charged and the loan was not approved.');
+      } else {
+        toast.error((err as Error).message || 'Could not approve — is the API running?');
+      }
     }
     setBusyActionId(null);
   };
@@ -614,6 +641,18 @@ export default function LeaderDashboard({ isReadOnly = false, activeSection = 't
                           {actionMessages[action.id]}
                         </p>
                       )}
+
+                      {/* The x402 handshake for THIS card, narrated live. */}
+                      {busy && (
+                        <div className="pt-2">
+                          <X402ProtocolSteps
+                            steps={approvalSteps}
+                            receipt={approvalReceipt}
+                            price="0.05 ALGO"
+                            compact
+                          />
+                        </div>
+                      )}
                     </div>
 
                     {isReadOnly ? (
@@ -621,12 +660,12 @@ export default function LeaderDashboard({ isReadOnly = false, activeSection = 't
                     ) : (
                       <div className="flex flex-row lg:flex-col gap-2 lg:w-44 flex-shrink-0">
                         <button
-                          onClick={() => handleApprove(action.id)}
+                          onClick={() => handleApprove(action.id, action)}
                           disabled={busy}
                           className="flex-1 py-2.5 px-4 bg-shg-primary text-white rounded-lg text-sm font-bold active:scale-95 transition-transform hover:opacity-90 disabled:opacity-60 inline-flex items-center justify-center gap-2"
                         >
-                          {busy ? <Loader2 className="w-4 h-4 animate-spin" /> : <CheckCircle2 className="w-4 h-4" />}
-                          {busy ? 'Settling…' : 'Approve'}
+                          {busy ? <Loader2 className="w-4 h-4 animate-spin" /> : <Wallet className="w-4 h-4" />}
+                          {busy ? 'Settling…' : 'Pay 0.05 ALGO & Approve'}
                         </button>
                         <button
                           onClick={() => handleReject(action.id, action.description)}
@@ -637,7 +676,8 @@ export default function LeaderDashboard({ isReadOnly = false, activeSection = 't
                           Decline
                         </button>
                         <p className="hidden lg:block text-[10px] text-muted-foreground text-center leading-snug">
-                          Approving debits the treasury immediately.
+                          x402: a 0.05 ALGO disbursement fee is paid from your Pera Wallet, then the
+                          treasury is debited.
                         </p>
                       </div>
                     )}

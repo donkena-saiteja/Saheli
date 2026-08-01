@@ -6,6 +6,7 @@ import MultiSigActionModel from '../models/MultiSigAction';
 import BankDisbursement from '../models/BankDisbursement';
 import { explorerTxUrl } from '../services/algorand';
 import { processBankDisbursement } from '../services/bankDisbursementService';
+import { PaidRequest, requirePayment } from '../x402/middleware';
 import {
   LEADER_APPROVALS_REQUIRED,
   declineLoan,
@@ -137,7 +138,12 @@ router.get('/:id', async (req: Request, res: Response) => {
 });
 
 // POST /api/loans/request
-router.post('/request', async (req: Request, res: Response) => {
+//
+// x402-gated. The member's own Pera wallet must settle the underwriting fee to
+// the hardcoded receiver BEFORE the request is evaluated or routed for
+// approval: without an X-PAYMENT header this returns HTTP 402 and no loan is
+// created. Pay-per-use, enforced at the only place it can't be faked.
+router.post('/request', requirePayment('loan-request'), async (req: PaidRequest, res: Response) => {
   const { memberId, amount, purpose } = req.body;
 
   if (!memberId || !amount || !purpose) {
@@ -195,6 +201,11 @@ router.post('/request', async (req: Request, res: Response) => {
       loan: mapLoan(hydrated || loan.toObject()),
       evaluation,
       approvalsRequired: LEADER_APPROVALS_REQUIRED,
+      // Receipt for the x402 payment that unlocked this request, so the UI can
+      // link straight to the settled transaction on the explorer.
+      x402: req.x402
+        ? { ...req.x402, explorerUrl: explorerTxUrl(req.x402.transaction) }
+        : null,
       message:
         evaluation.recommendation === 'reject'
           ? 'Loan request recorded but not routed for approval — trust score is below the lending threshold.'
@@ -204,7 +215,10 @@ router.post('/request', async (req: Request, res: Response) => {
 });
 
 // POST /api/loans/:id/approve — the single leader sign-off
-router.post('/:id/approve', async (req: Request, res: Response) => {
+//
+// Gated identically to the multisig path, so a leader cannot sidestep the x402
+// fee by hitting the other endpoint.
+router.post('/:id/approve', requirePayment('loan-approval'), async (req: PaidRequest, res: Response) => {
   if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
     res.status(404).json({ success: false, error: 'Loan not found' });
     return;
@@ -245,6 +259,7 @@ router.post('/:id/approve', async (req: Request, res: Response) => {
     data: {
       loan: mapLoan(hydrated || loan.toObject()),
       settlement,
+      x402: req.x402 ? { ...req.x402, explorerUrl: explorerTxUrl(req.x402.transaction) } : null,
       message:
         `Approved by ${approvedBy}. ₹${loan.amount.toLocaleString('en-IN')} debited from the SHG treasury ` +
         `(balance now ₹${settlement.treasuryBalanceAfter.toLocaleString('en-IN')}).`,

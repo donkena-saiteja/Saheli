@@ -31,6 +31,7 @@ import {
   getRelayerAccount,
   simulatedTxId,
 } from '../services/algorand';
+import { NATIVE_ALGO_ASSET } from './pricing';
 
 export const X402_VERSION = 2;
 export const SCHEME_EXACT = 'exact';
@@ -70,6 +71,30 @@ function isExactAvmPayload(payload: unknown): payload is ExactAvmPayloadV2 {
 
 function fail(reason: string, message: string): VerifyResponse {
   return { isValid: false, invalidReason: reason, invalidMessage: message };
+}
+
+/**
+ * Turns an algod pool rejection into something the person holding the phone can
+ * act on. Raw errors read like `TransactionPool.Remember: … balance 50000 below
+ * min 100000`, which tells an SHG member nothing.
+ */
+function explainSettlementFailure(detail: string): string {
+  if (/overspend|below min/i.test(detail)) {
+    return (
+      'Your wallet does not hold enough ALGO to cover this x402 payment plus the network fee and ' +
+      "Algorand's 0.1 ALGO minimum balance. Top up at https://bank.testnet.algorand.network and retry."
+    );
+  }
+  if (/txn dead|round.*expired|LastValid/i.test(detail)) {
+    return 'The payment expired before it was submitted (Algorand transactions last ~1000 rounds). Start the request again.';
+  }
+  if (/transaction already in ledger/i.test(detail)) {
+    return 'This x402 payment was already settled. Refresh — the resource should be unlocked.';
+  }
+  if (/signature|not authorized/i.test(detail)) {
+    return 'The signature did not match the paying address. Check Pera Wallet is on the same account and network as the app.';
+  }
+  return `Algorand rejected the x402 settlement: ${detail}`;
 }
 
 export class LocalAvmFacilitator implements FacilitatorClient {
@@ -125,36 +150,71 @@ export class LocalAvmFacilitator implements FacilitatorClient {
       );
     }
 
-    // 6. The payment transaction itself
+    // 6. The payment transaction itself.
+    //
+    // Two settlement shapes are accepted, selected by the asset id in the
+    // requirements the server itself advertised:
+    //   asset "0"  -> native ALGO, carried by a `pay` transaction
+    //   asset "N"  -> an ASA (USDC), carried by an `axfer` transaction
+    // Native ALGO exists because a member's Pera wallet holds only dispenser
+    // ALGO and is opted in to nothing, so an axfer could never clear.
     const paymentTxn = decoded[paymentIndex].txn;
-    if (paymentTxn.type !== 'axfer' || !paymentTxn.assetTransfer) {
-      return fail('invalid_payment', 'Payment transaction must be an asset transfer (axfer)');
-    }
-
-    const transfer = paymentTxn.assetTransfer;
     const payer = String(paymentTxn.sender);
+    const wantsNativeAlgo = String(paymentRequirements.asset) === NATIVE_ALGO_ASSET;
 
-    if (String(transfer.assetIndex) !== String(paymentRequirements.asset)) {
-      return fail(
-        'invalid_asset',
-        `Expected asset ${paymentRequirements.asset}, got ${transfer.assetIndex}`,
-      );
+    if (wantsNativeAlgo) {
+      if (paymentTxn.type !== 'pay' || !paymentTxn.payment) {
+        return fail(
+          'invalid_payment',
+          'Native ALGO settlement requires a payment (pay) transaction',
+        );
+      }
+
+      const payment = paymentTxn.payment;
+      if (String(payment.receiver) !== paymentRequirements.payTo) {
+        return fail(
+          'invalid_receiver',
+          `Expected payTo ${paymentRequirements.payTo}, got ${payment.receiver}`,
+        );
+      }
+      if (BigInt(payment.amount) !== BigInt(paymentRequirements.amount)) {
+        return fail(
+          'insufficient_amount',
+          `Expected amount ${paymentRequirements.amount} microAlgos, got ${payment.amount}`,
+        );
+      }
+      if (payment.closeRemainderTo) {
+        return fail('invalid_payment', 'Payment transaction must not close the payer account');
+      }
+    } else {
+      if (paymentTxn.type !== 'axfer' || !paymentTxn.assetTransfer) {
+        return fail('invalid_payment', 'Payment transaction must be an asset transfer (axfer)');
+      }
+
+      const transfer = paymentTxn.assetTransfer;
+      if (String(transfer.assetIndex) !== String(paymentRequirements.asset)) {
+        return fail(
+          'invalid_asset',
+          `Expected asset ${paymentRequirements.asset}, got ${transfer.assetIndex}`,
+        );
+      }
+      if (String(transfer.receiver) !== paymentRequirements.payTo) {
+        return fail(
+          'invalid_receiver',
+          `Expected payTo ${paymentRequirements.payTo}, got ${transfer.receiver}`,
+        );
+      }
+      if (BigInt(transfer.amount) !== BigInt(paymentRequirements.amount)) {
+        return fail(
+          'insufficient_amount',
+          `Expected amount ${paymentRequirements.amount}, got ${transfer.amount}`,
+        );
+      }
+      if (transfer.closeRemainderTo) {
+        return fail('invalid_payment', 'Payment transaction must not close the asset holding');
+      }
     }
-    if (String(transfer.receiver) !== paymentRequirements.payTo) {
-      return fail(
-        'invalid_receiver',
-        `Expected payTo ${paymentRequirements.payTo}, got ${transfer.receiver}`,
-      );
-    }
-    if (BigInt(transfer.amount) !== BigInt(paymentRequirements.amount)) {
-      return fail(
-        'insufficient_amount',
-        `Expected amount ${paymentRequirements.amount}, got ${transfer.amount}`,
-      );
-    }
-    if (transfer.closeRemainderTo) {
-      return fail('invalid_payment', 'Payment transaction must not close the asset holding');
-    }
+
     if (paymentTxn.rekeyTo) {
       return fail('invalid_payment', 'Payment transaction must not rekey the payer');
     }
@@ -246,17 +306,37 @@ insufficientLedgerBalance: false,
     const health = await getChainHealth();
     const allSigned = decoded.every((d) => d.signed);
 
-    if (health.mode !== 'live' || !allSigned) {
+    /**
+     * Does this group need the relayer to be solvent?
+     *
+     * Only if it contains a relayer fee-pooling transaction. A Pera-signed
+     * loan payment is one self-funded transaction: the member covers their own
+     * fee, so an unfunded relayer is irrelevant and must NOT downgrade a real
+     * payment to a simulated one. Getting this wrong would debit a member's
+     * wallet and then report a txid that resolves to nothing.
+     */
+    const relayerAddress = getRelayerAccount().address;
+    const needsRelayer = decoded.some(
+      (entry, index) => index !== payload.paymentIndex && String(entry.txn.sender) === relayerAddress,
+    );
+
+    const canBroadcast =
+      health.reachable && allSigned && (!needsRelayer || health.mode === 'live');
+
+    if (!canBroadcast) {
+      const reason = !allSigned
+        ? 'group contains unsigned transactions'
+        : !health.reachable
+          ? health.reason || 'algod unreachable'
+          : health.reason || 'relayer cannot cover group fees';
+
       return {
         success: true,
         payer: verification.payer,
         transaction: txId,
         network: paymentRequirements.network,
         amount: paymentRequirements.amount,
-        extra: {
-          settlement: 'simulated',
-          reason: health.mode !== 'live' ? health.reason : 'group contains unsigned transactions',
-        },
+        extra: { settlement: 'simulated', reason },
       };
     }
 
@@ -281,7 +361,7 @@ insufficientLedgerBalance: false,
       return {
         success: false,
         errorReason: 'settlement_failed',
-        errorMessage: message,
+        errorMessage: explainSettlementFailure(message),
         payer: verification.payer,
         transaction: txId,
         network: paymentRequirements.network,

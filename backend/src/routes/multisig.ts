@@ -5,6 +5,7 @@ import { submitAtomicApproval, explorerTxUrl } from '../services/algorand';
 import MultiSigActionModel from '../models/MultiSigAction';
 import LoanModel from '../models/Loan';
 import { LEADER_APPROVALS_REQUIRED, declineLoan, settleApprovedLoan } from '../services/loanWorkflow';
+import { PaidRequest, requirePayment } from '../x402/middleware';
 
 const router = Router();
 
@@ -53,7 +54,12 @@ router.get('/', async (req: Request, res: Response) => {
 });
 
 // POST /api/multisig/:id/sign
-router.post('/:id/sign', async (req: Request, res: Response) => {
+//
+// x402-gated, same as the loan request. The leader settles the disbursement fee
+// from their own Pera wallet to the hardcoded receiver before their signature
+// is recorded — so a 402 here means nothing was approved and no treasury
+// movement happened.
+router.post('/:id/sign', requirePayment('loan-approval'), async (req: PaidRequest, res: Response) => {
   const action = await MultiSigActionModel.findOne({ id: req.params.id });
   if (!action) {
     res.status(404).json({ success: false, error: 'Action not found' });
@@ -121,7 +127,12 @@ router.post('/:id/sign', async (req: Request, res: Response) => {
 
   res.json({
     success: true,
-    data: { action: mapDocToAction(action), settlement, message },
+    data: {
+      action: mapDocToAction(action),
+      settlement,
+      x402: req.x402 ? { ...req.x402, explorerUrl: explorerTxUrl(req.x402.transaction) } : null,
+      message,
+    },
   });
 });
 

@@ -5,7 +5,7 @@ const BASE_URL = import.meta.env.VITE_API_BASE_URL || '/api';
 
 async function apiFetch<T>(path: string, options?: RequestInit): Promise<T> {
   const token = localStorage.getItem('saheli-token');
-  
+
   const res = await fetch(`${BASE_URL}${path}`, {
     ...options,
     headers: {
@@ -17,11 +17,67 @@ async function apiFetch<T>(path: string, options?: RequestInit): Promise<T> {
 
   if (!res.ok) {
     const err = await res.json().catch(() => ({ error: 'Network error' }));
-    throw new Error(err.error || `HTTP ${res.status}`);
+    throw buildApiError(res.status, err);
   }
 
   const json = await res.json();
   return json.data;
+}
+
+/**
+ * Turns a failed response into an Error that still carries what the caller
+ * needs to react.
+ *
+ * A 402 is not a generic failure — it is the x402 protocol asking for payment,
+ * and its body holds the PaymentRequirements. Flattening it to `HTTP 402` would
+ * throw away the one thing that makes the response actionable, so the parsed
+ * body and the verify/settle reasons ride along on the error.
+ */
+function buildApiError(status: number, body: any): Error {
+  const settleMessage = body?.settleError?.message;
+  const verifyMessage = body?.verifyError?.message;
+
+  const message =
+    settleMessage ||
+    verifyMessage ||
+    body?.error ||
+    (status === 402 ? 'Payment required' : `HTTP ${status}`);
+
+  return Object.assign(new Error(message), {
+    status,
+    body,
+    isPaymentRequired: status === 402,
+    paymentRequirements: body?.accepts?.[0],
+  });
+}
+
+/** True when the API answered with an x402 challenge rather than a real error. */
+export function isPaymentRequiredError(err: unknown): boolean {
+  return Boolean((err as { isPaymentRequired?: boolean })?.isPaymentRequired);
+}
+
+/** Same as apiFetch, but settles an x402 payment header alongside the request. */
+async function apiFetchPaid<T>(
+  path: string,
+  paymentHeader: string,
+  options?: RequestInit,
+): Promise<{ data: T; paymentResponse: string | null }> {
+  const token = localStorage.getItem('saheli-token');
+
+  const res = await fetch(`${BASE_URL}${path}`, {
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      'X-PAYMENT': paymentHeader,
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      ...options?.headers,
+    },
+  });
+
+  const json = await res.json().catch(() => ({}));
+  if (!res.ok) throw buildApiError(res.status, json);
+
+  return { data: json.data, paymentResponse: res.headers.get('x-payment-response') };
 }
 
 // ─── Auth ─────────────────────────────────────────────────────────────────────
@@ -86,10 +142,20 @@ export const loansApi = {
   getTreasuryBalance: () => apiFetch<{ balance: number; currency: string }>('/loans/treasury/balance'),
   processBankQueue: (id: string, processedBy?: string) =>
     apiFetch<any>(`/loans/bank-queue/${id}/process`, { method: 'POST', body: JSON.stringify({ processedBy }) }),
-  request: (body: { memberId: string; amount: number; purpose: string }) =>
-    apiFetch<any>('/loans/request', { method: 'POST', body: JSON.stringify(body) }),
-  approve: (id: string, approvedBy?: string) =>
-    apiFetch<any>(`/loans/${id}/approve`, { method: 'POST', body: JSON.stringify({ approvedBy }) }),
+  /**
+   * x402-gated. Without a settled payment header the API answers 402 and no
+   * loan is created, so the header is required rather than optional.
+   */
+  request: (body: { memberId: string; amount: number; purpose: string }, paymentHeader: string) =>
+    apiFetchPaid<any>('/loans/request', paymentHeader, {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+  approve: (id: string, paymentHeader: string, approvedBy?: string) =>
+    apiFetchPaid<any>(`/loans/${id}/approve`, paymentHeader, {
+      method: 'POST',
+      body: JSON.stringify({ approvedBy }),
+    }),
   decline: (id: string, reason?: string, declinedBy?: string) =>
     apiFetch<any>(`/loans/${id}/decline`, { method: 'POST', body: JSON.stringify({ reason, declinedBy }) }),
 };
@@ -100,8 +166,12 @@ export const multisigApi = {
   getPending: (destinationRole?: string) =>
     apiFetch<any[]>(`/multisig/pending${destinationRole ? `?destinationRole=${destinationRole}` : ''}`),
   getAll: (status?: string) => apiFetch<any[]>(`/multisig${status ? `?status=${status}` : ''}`),
-  sign: (id: string, signerId?: string) =>
-    apiFetch<any>(`/multisig/${id}/sign`, { method: 'POST', body: JSON.stringify({ signerId }) }),
+  /** x402-gated: the leader's Pera wallet settles before the signature counts. */
+  sign: (id: string, paymentHeader: string, signerId?: string) =>
+    apiFetchPaid<any>(`/multisig/${id}/sign`, paymentHeader, {
+      method: 'POST',
+      body: JSON.stringify({ signerId }),
+    }),
   reject: (id: string, reason?: string, declinedBy?: string) =>
     apiFetch<any>(`/multisig/${id}/reject`, { method: 'POST', body: JSON.stringify({ reason, declinedBy }) }),
 };
@@ -264,6 +334,46 @@ export const x402Api = {
   getCatalogue: () => apiFetch<any>('/x402/catalogue'),
   getSupported: () => apiFetch<any>('/x402/supported'),
   getRevenue: () => apiFetch<any>('/x402/revenue'),
+
+  /** The hardcoded receiver every wallet-signed loan payment lands in. */
+  getReceiver: () =>
+    apiFetch<{
+      address: string;
+      network: string;
+      algos: number;
+      funded: boolean;
+      explorerUrl: string;
+      dispenser?: string;
+      hardcoded: boolean;
+    }>('/x402/wallet/receiver'),
+
+  /**
+   * Step 1 of the wallet-signed loop: the 402 challenge plus the unsigned
+   * payment that satisfies it, built server-side so the receiver and amount
+   * cannot be altered here.
+   */
+  walletPrepare: (body: {
+    resourceId: 'loan-request' | 'loan-approval';
+    payerAddress: string;
+    context?: Record<string, unknown>;
+  }) =>
+    apiFetch<{
+      resourceId: 'loan-request' | 'loan-approval';
+      unsignedTxn: string;
+      txId: string;
+      requirements: Record<string, unknown>;
+      payer: string;
+      payTo: string;
+      amountAtomic: string;
+      amountAlgos: number;
+      assetSymbol: string;
+      displayPrice: string;
+      description: string;
+      network: string;
+      explorerPayer: string;
+      explorerPayTo: string;
+      challenge: unknown;
+    }>('/x402/wallet/prepare', { method: 'POST', body: JSON.stringify(body) }),
 
   /** Calls a gated endpoint with no payment, returning the raw 402 body. */
   probe: async (resourceId: string) => {

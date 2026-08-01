@@ -18,7 +18,13 @@ const x402PaymentSchema = new mongoose.Schema(
     displayAmount: { type: String },
 
     payer: { type: String },
-    payerType: { type: String, enum: ['bank', 'ngo', 'fintech', 'agent'], default: 'bank' },
+    payerType: {
+      type: String,
+      // `member` and `leader` are the wallet-signed loan gates, where the payer
+      // is a person approving in Pera rather than an institution's server key.
+      enum: ['bank', 'ngo', 'fintech', 'agent', 'member', 'leader'],
+      default: 'bank',
+    },
     payTo: { type: String, required: true },
 
     transactionId: { type: String, index: true },

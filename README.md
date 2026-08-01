@@ -13,7 +13,7 @@ Tracks: *Blockchain with Algorand* · *Agentic AI × Blockchain*
 
 | Requirement | Status | Where |
 |---|---|---|
-| **x402 Pay-per-Use Payments** (mandatory) | ✅ Implemented — x402 v2, `exact` scheme on `algorand:SGO1GKSzyE7IEPItTxCByw9x8FmnrCDe` | [`backend/src/x402/`](backend/src/x402/) |
+| **x402 Pay-per-Use Payments** (mandatory) | ✅ x402 v2, `exact` scheme on `algorand:SGO1GKSzyE7IEPItTxCByw9x8FmnrCDe` — **gating the loan lifecycle itself**: a member's Pera Wallet pays before a loan request is accepted, a leader's pays before an approval settles | [`backend/src/x402/`](backend/src/x402/) |
 | **AlgoKit** | ✅ 3 Algorand Python contracts, compiled to TEAL v11 | [`contracts/`](contracts/) |
 | **Pera Wallet sign-in** | ✅ Challenge/response, single-use nonce, ed25519 verified server-side | [`backend/src/services/walletAuth.ts`](backend/src/services/walletAuth.ts) · [`app/src/lib/pera.ts`](app/src/lib/pera.ts) |
 | **Agentic AI** | ✅ Autonomous compliance + treasury agent, OpenAI-reasoned | [`backend/src/services/aiMonitor.ts`](backend/src/services/aiMonitor.ts) |
@@ -99,7 +99,9 @@ Compiled TEAL is already committed, so this is only needed to re-verify or deplo
 | Transactions as raw JSON | `GET /api/transactions/ledger?limit=100` · `GET /api/transactions?memberId=<id>` |
 | A single transaction on chain | `GET /api/algorand/tx/:txId`, or open `https://lora.algokit.io/testnet/transaction/<txId>` |
 | Independent proof of a transaction | `GET /api/qr/verify/:transactionId` — checks Algorand first, our ledger second |
+| **x402 gating a real action** | Member → **Request Loan** → *Pay 0.05 ALGO & Submit* · Leader → **Pay 0.05 ALGO & Approve** |
 | **x402 working, visually** | Any dashboard → **x402 Pay-per-Use** |
+| The 402 itself, raw | `curl -i -X POST http://127.0.0.1:3001/api/loans/request -H "Content-Type: application/json" -d "{}"` |
 | x402 revenue routed to SHGs | `GET /api/x402/revenue`, or the revenue panel in the x402 console |
 | Wallet/relayer/chain status | `GET /api/algorand/info` and `/health` · the banner on every dashboard |
 | Your own profile / wallet / sign out | Click the **avatar in the top bar** |
@@ -114,7 +116,20 @@ Most hackathon x402 integrations bolt a paywall onto a demo endpoint. Ours **is 
 
 An SHG's most valuable asset is its repayment history — and today banks, MFIs and NGOs extract it for free. Saheli inverts that: institutional access is metered per API call, and **the money flows back into the SHG treasury**.
 
-### Priced resources
+### Two classes of priced resource
+
+**A. Wallet-signed gates on the loan lifecycle** — settled in native ALGO by a human approving in **Pera Wallet**. These are not side features: the loan lifecycle *cannot proceed* without them.
+
+| Resource | Price | Who pays | Receiver |
+|---|---|---|---|
+| `POST /api/loans/request` | 0.05 ALGO | **SHG member**, from her own Pera Wallet | hardcoded |
+| `POST /api/multisig/:id/sign` | 0.05 ALGO | **SHG leader**, from his own Pera Wallet | hardcoded |
+
+Call either without an `X-PAYMENT` header and you get a real HTTP **402** — no loan is created, no treasury moves. The member signs the underwriting fee on her device before her request is evaluated; the leader signs the disbursement fee before his approval counts. Both land in a receiver address hardcoded in [`backend/src/x402/pricing.ts`](backend/src/x402/pricing.ts), so the server owns the destination and a tampered client cannot redirect it.
+
+These settle in **native ALGO (`asset: "0"`)** rather than USDC, deliberately: a freshly created Pera wallet holds only dispenser ALGO and is opted in to no ASA, so a USDC `axfer` could never clear on demo day.
+
+**B. Machine-to-machine data resources** — settled in USDC by an institution's server key.
 
 | Resource | Price | Who pays | → SHG |
 |---|---|---|---|
@@ -125,6 +140,29 @@ An SHG's most valuable asset is its repayment history — and today banks, MFIs 
 | `POST /api/x402/ai-underwriting` | $1.00 | **Autonomous AI agent** | 60% |
 
 That last row is the agentic-commerce story: a bank's underwriting agent discovers the endpoint, receives a 402, pays autonomously, and consumes the answer — no invoice, no human, no account setup.
+
+### The wallet-signed loop, end to end
+
+```
+Member taps "Pay 0.05 ALGO & Submit"
+  │
+  ├─ POST /api/loans/request                 → 402 Payment Required + PaymentRequirements
+  ├─ POST /api/x402/wallet/prepare           → server builds the unsigned payment
+  │                                            (receiver + amount fixed server-side)
+  ├─ Pera Wallet signs on the device         → private key never leaves the phone
+  ├─ POST /api/loans/request                 → retried with X-PAYMENT: base64(payload)
+  │     ├─ facilitator.verify()              → 8 spec checks
+  │     └─ facilitator.settle()              → broadcast to Algorand, wait for confirmation
+  └─ 201 Created + X-PAYMENT-RESPONSE        → loan routed for approval
+```
+
+Run it yourself against a live server:
+
+```bash
+npm run verify:x402
+```
+
+16 assertions covering the 402 shape, the hardcoded receiver, native-ALGO settlement, tamper rejection (redirecting the payment and underpaying are both refused), and — importantly — that settlement genuinely reaches algod rather than silently faking a transaction id.
 
 ### Proving x402 actually ran — five independent pieces of evidence
 

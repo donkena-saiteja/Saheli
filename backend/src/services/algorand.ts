@@ -195,6 +195,15 @@ interface HealthCache {
   round: number;
   checkedAt: number;
   reason?: string;
+  /**
+   * Whether algod answered at all — independent of relayer funding.
+   *
+   * `mode` conflates two very different failures: an unreachable node, and a
+   * reachable node with a broke relayer. Flows where the *user's own wallet*
+   * pays the fee (Pera-signed x402) do not care about the relayer, and must
+   * still settle for real. They check this instead of `mode`.
+   */
+  reachable: boolean;
 }
 
 let healthCache: HealthCache | null = null;
@@ -216,6 +225,7 @@ export async function getChainHealth(force = false): Promise<HealthCache> {
       round: 0,
       checkedAt: Date.now(),
       reason: 'ALGORAND_FORCE_SIMULATION=true',
+      reachable: false,
     };
     return healthCache;
   }
@@ -239,6 +249,7 @@ export async function getChainHealth(force = false): Promise<HealthCache> {
       reason: fundedEnough
         ? undefined
         : `Relayer ${relayer.address} holds ${balance} microAlgos. Fund it at https://bank.testnet.algorand.network to enable live settlement.`,
+      reachable: true,
     };
   } catch (err) {
     healthCache = {
@@ -247,6 +258,7 @@ export async function getChainHealth(force = false): Promise<HealthCache> {
       round: 0,
       checkedAt: Date.now(),
       reason: err instanceof Error ? `algod unreachable: ${err.message}` : 'algod unreachable',
+      reachable: false,
     };
   }
 

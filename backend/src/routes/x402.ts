@@ -24,15 +24,17 @@ import X402Payment from '../models/X402Payment';
 import DSBT from '../models/DSBT';
 import { getOrMintPassport, serializePassport, scoreToTier, tierVisual } from '../services/dsbt';
 import { verifyOnChain, getChainInfo, getCaip2Network } from '../services/algorand';
-import { PaidRequest, buildRequirements, requirePayment } from '../x402/middleware';
+import { PaidRequest, buildPaymentRequired, buildRequirements, requirePayment } from '../x402/middleware';
 import { getFacilitator, getFacilitatorMode, X402_VERSION } from '../x402/facilitator';
 import { buildPaymentPayload, encodePaymentHeader } from '../x402/payer';
+import { getReceiverStatus, prepareWalletPayment } from '../x402/walletPayer';
 import {
   PRICED_RESOURCES,
   ResourceId,
   listResources,
   getPayToAddress,
   getSettlementAsset,
+  isWalletSignedResource,
   toDisplayAmount,
 } from '../x402/pricing';
 
@@ -52,6 +54,7 @@ router.get('/catalogue', async (_req: Request, res: Response) => {
       payTo: getPayToAddress(),
       facilitator: getFacilitatorMode(),
       chainMode: chain.mode,
+      loanReceiver: getPayToAddress('loan-request'),
       resources: listResources().map((r) => ({
         id: r.id,
         path: r.path,
@@ -61,6 +64,12 @@ router.get('/catalogue', async (_req: Request, res: Response) => {
         description: r.description,
         payerType: r.payerType,
         treasuryShareBps: r.treasuryShareBps,
+        // Per-resource, because the loan gates settle in native ALGO from a
+        // Pera wallet while the data resources settle in USDC from a server key.
+        asset: getSettlementAsset(r.id),
+        payTo: getPayToAddress(r.id),
+        settlementAsset: r.settlementAsset,
+        walletSigned: Boolean(r.walletSigned),
       })),
     },
   });
@@ -69,6 +78,61 @@ router.get('/catalogue', async (_req: Request, res: Response) => {
 router.get('/supported', async (_req: Request, res: Response) => {
   const supported = await getFacilitator().getSupported();
   res.json({ success: true, data: { ...supported, facilitator: getFacilitatorMode() } });
+});
+
+// ─── Wallet-signed payments (member / leader pay from their own Pera) ─────────
+
+/**
+ * The hardcoded receiver every wallet-signed loan payment lands in.
+ *
+ * Exposed so the UI can show the judge the destination address, its live
+ * balance and an explorer link before a single rupee moves.
+ */
+router.get('/wallet/receiver', async (_req: Request, res: Response) => {
+  res.json({ success: true, data: await getReceiverStatus() });
+});
+
+/**
+ * Step 1 of the wallet-signed loop: hand back the 402 challenge *and* the
+ * unsigned payment that satisfies it.
+ *
+ * The server builds the transaction so the browser cannot change the receiver
+ * or the amount — it may only approve or refuse what is already fixed here.
+ */
+router.post('/wallet/prepare', async (req: Request, res: Response) => {
+  const resourceId = String(req.body?.resourceId || '') as ResourceId;
+  const payerAddress = String(req.body?.payerAddress || '').trim();
+
+  if (!PRICED_RESOURCES[resourceId] || !isWalletSignedResource(resourceId)) {
+    res.status(400).json({
+      success: false,
+      error: `resourceId must be one of: ${listResources()
+        .filter((r) => r.walletSigned)
+        .map((r) => r.id)
+        .join(', ')}`,
+    });
+    return;
+  }
+
+  const requirements = buildRequirements(resourceId);
+  const prepared = await prepareWalletPayment({
+    resourceId,
+    payerAddress,
+    requirements,
+    context: req.body?.context,
+  });
+
+  res.json({
+    success: true,
+    data: {
+      ...prepared,
+      // The exact body the gated route returns when called without payment, so
+      // the UI can display the real protocol challenge rather than a mock-up.
+      challenge: buildPaymentRequired(req, resourceId, 'Payment required to access this resource'),
+      x402Version: X402_VERSION,
+      facilitator: getFacilitatorMode(),
+    },
+  });
 });
 
 // ─── Paid: SHG credit report ─────────────────────────────────────────────────
